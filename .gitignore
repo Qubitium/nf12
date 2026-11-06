@@ -1,0 +1,9 @@
+.venv/
+build/
+*.so
+__pycache__/
+*.egg-info/
+/dist/
+/results/
+tests/kernels/codec/codec_test
+bench/results/

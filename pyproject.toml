@@ -1,0 +1,44 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "torch>=2.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "nf12"
+version = "1.0.0"
+description = "Lossless 12-bit encoding of BF16 weights with fused CUDA decode-GEMM kernels"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.10"]
+
+[dependency-groups]
+test = ["pytest", "numpy", "safetensors"]
+bench = ["huggingface-hub", "numpy", "safetensors"]
+
+[tool.uv]
+# Rebuild native libraries when sources or the target architectures change.
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "CMakeLists.txt" },
+  { file = "csrc/**/*" },
+  { file = "include/**/*" },
+  { env = "NF12_CUDA_ARCHS" },
+]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.26"
+cmake.build-type = "Release"
+ninja.make-fallback = false
+# Reuse the build tree for incremental editable installs.
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["python/nf12"]
+# The torch stable ABI does not depend on the Python ABI.
+wheel.py-api = "py3"
+sdist.exclude = [".venv", "build"]
+
+[tool.scikit-build.cmake.define]
+NF12_CUDA_ARCHS = { env = "NF12_CUDA_ARCHS", default = "80;86;89;90;100;110;120" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests/api"]

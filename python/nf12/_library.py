@@ -1,0 +1,120 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Lazy loading of the native libraries and the fake (meta) op implementations.
+
+Nothing is loaded at ``import nf12`` time, so pure-Python modules such as
+``nf12.reference`` work without a compiled build.
+"""
+
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+
+import torch
+
+import nf12
+
+_lock = threading.Lock()
+_loaded = False
+
+
+def library_path(name: str = "libnf12.so") -> Path:
+    """Path of a native library shipped with the package (``libnf12.so`` is the C API)."""
+    # Editable installs put the native install tree before the Python source tree.
+    for directory in nf12.__path__:
+        candidate = Path(directory) / name
+        if candidate.is_file():
+            return candidate
+    raise ImportError(
+        f"nf12: native library {name} not found in {list(nf12.__path__)}; "
+        "build the package with `uv sync`"
+    )
+
+
+def load() -> None:
+    """Idempotently loads the torch extension (``torch.ops.nf12``) on first use."""
+    global _loaded
+    if _loaded:
+        return
+    with _lock:
+        if _loaded:
+            return
+        torch.ops.load_library(str(library_path("libnf12_torch.so")))
+        _register_fakes()
+        _loaded = True
+
+
+def _register_fakes() -> None:
+    @torch.library.register_fake("nf12::encode")
+    def _encode(w):
+        ctx = torch.library.get_ctx()
+        n, k = w.shape
+        packed = w.new_empty((n, k * 3 // 2), dtype=torch.uint8)
+        escapes = w.new_empty((ctx.new_dynamic_size(), 8), dtype=torch.int16)
+        return packed, escapes, ctx.new_dynamic_size(min=0, max=120)
+
+    @torch.library.register_fake("nf12::decode")
+    def _decode(packed, escapes, exp_base):
+        n, row_bytes = packed.shape
+        return packed.new_empty((n, row_bytes * 2 // 3), dtype=torch.bfloat16)
+
+    @torch.library.register_fake("nf12::linear")
+    def _linear(x, packed, escapes, exp_base, bias=None):
+        return x.new_empty((*x.shape[:-1], packed.shape[0]))
+
+    @torch.library.register_fake("nf12::pack_bf16t")
+    def _pack_bf16t(w):
+        n, k = w.shape
+        return w.new_empty((n, 2 * k), dtype=torch.uint8)
+
+    @torch.library.register_fake("nf12::linear_bf16t")
+    def _linear_bf16t(x, w_bf16t, bias=None):
+        return x.new_empty((*x.shape[:-1], w_bf16t.shape[0]))
+
+    @torch.library.register_fake("nf12::embedding")
+    def _embedding(ids, packed, escapes, exp_base):
+        return packed.new_empty((*ids.shape, packed.shape[1] * 2 // 3), dtype=torch.bfloat16)
+
+    @torch.library.register_fake("nf12::encode_moe")
+    def _encode_moe(w):
+        ctx = torch.library.get_ctx()
+        e, n, k = w.shape
+        packed = w.new_empty((e, n, k * 3 // 2), dtype=torch.uint8)
+        escapes = w.new_empty((ctx.new_dynamic_size(), 8), dtype=torch.int16)
+        return packed, escapes, w.new_empty((e + 1,), dtype=torch.int64), w.new_empty((e,), dtype=torch.uint8)
+
+    @torch.library.register_fake("nf12::moe_align")
+    def _moe_align(topk_ids, num_experts):
+        return (topk_ids.new_empty((topk_ids.numel(),), dtype=torch.int32),
+                topk_ids.new_empty((num_experts + 1,), dtype=torch.int64))
+
+    @torch.library.register_fake("nf12::moe_decode")
+    def _moe_decode(packed, escapes, escape_offsets, exp_base):
+        e, n, row_bytes = packed.shape
+        return packed.new_empty((e, n, row_bytes * 2 // 3), dtype=torch.bfloat16)
+
+    def _moe_rows(x, gather, scatter):
+        return gather.shape[0] if gather is not None else scatter.shape[0] if scatter is not None else x.shape[0]
+
+    @torch.library.register_fake("nf12::moe_linear")
+    def _moe_linear(x, packed, escapes, escape_offsets, exp_base, expert_offsets, gather=None, gather_div=1,
+                    scatter=None, row_scale=None, zero_fill=False):
+        return x.new_empty((_moe_rows(x, gather, scatter), packed.shape[1]))
+
+    @torch.library.register_fake("nf12::moe_linear_bf16t")
+    def _moe_linear_bf16t(x, w_bf16t, expert_offsets, gather=None, gather_div=1, scatter=None, row_scale=None,
+                          zero_fill=False):
+        return x.new_empty((_moe_rows(x, gather, scatter), w_bf16t.shape[1]))
+
+    @torch.library.register_fake("nf12::moe_combine")
+    def _moe_combine(y, topk):
+        return y.new_empty((y.shape[0] // topk, y.shape[1]))
+
+    @torch.library.register_fake("nf12::moe_silu_mul")
+    def _moe_silu_mul(h):
+        return h.new_empty((h.shape[0], h.shape[1] // 2))
+
+    @torch.library.register_fake("nf12::_fused_moe")
+    def _fused_moe(x, packed13, escapes13, escape_offsets13, exp_base13,
+                   packed2, escapes2, escape_offsets2, exp_base2, topk_weights, topk_ids, zero_fill=False):
+        return x.new_empty((x.shape[0], packed2.shape[1]))
