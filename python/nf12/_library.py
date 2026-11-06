@@ -19,16 +19,19 @@ _loaded = False
 
 
 def library_path(name: str = "libnf12.so") -> Path:
-    """Path of a native library shipped with the package (``libnf12.so`` is the C API)."""
+    """Find a packaged native library, or build and cache it for visible GPUs."""
     # Editable installs put the native install tree before the Python source tree.
     for directory in nf12.__path__:
         candidate = Path(directory) / name
         if candidate.is_file():
+            if name == "libnf12_torch.so" and not candidate.with_name("libnf12.so").is_file():
+                continue
             return candidate
-    raise ImportError(
-        f"nf12: native library {name} not found in {list(nf12.__path__)}; "
-        "build the package with `uv sync`"
-    )
+    if name in ("libnf12.so", "libnf12_torch.so"):
+        from ._jit import library_directory
+
+        return library_directory() / name
+    raise ImportError(f"nf12: native library {name} not found in {list(nf12.__path__)}")
 
 
 def load() -> None:

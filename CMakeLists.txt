@@ -30,7 +30,21 @@ endforeach()
 list(APPEND _nf12_archs "${_nf12_max_arch}-virtual")
 set(CMAKE_CUDA_ARCHITECTURES "${_nf12_archs}")
 
-project(nf12 VERSION 1.0.0 LANGUAGES CXX CUDA)
+option(NF12_BUILD_NATIVE "Build native libraries during installation" ON)
+if(NF12_BUILD_NATIVE)
+  project(nf12 VERSION 1.0.0 LANGUAGES CXX CUDA)
+else()
+  project(nf12 VERSION 1.0.0 LANGUAGES NONE)
+endif()
+
+# Installed wheels retain the sources for runtime builds without a checkout.
+install(FILES CMakeLists.txt DESTINATION nf12/_src)
+install(DIRECTORY csrc include DESTINATION nf12/_src
+  FILES_MATCHING PATTERN "*.cu" PATTERN "*.cpp" PATTERN "*.cuh"
+  PATTERN "*.h" PATTERN "*.map")
+if(NOT NF12_BUILD_NATIVE)
+  return()
+endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -38,6 +52,12 @@ endif()
 
 find_package(CUDAToolkit REQUIRED)
 message(STATUS "nf12: CUDA ${CUDAToolkit_VERSION}, archs ${CMAKE_CUDA_ARCHITECTURES}")
+
+# Release wheels bundle libcudart with auditwheel.
+if(NF12_CUDA_RUNTIME_LICENSE)
+  install(FILES "${NF12_CUDA_RUNTIME_LICENSE}" DESTINATION nf12/licenses
+    RENAME NVIDIA_CUDA_RUNTIME.txt)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

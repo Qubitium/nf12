@@ -12,17 +12,32 @@ described in the paper. You can read [the spec](docs/SPEC.md) for more info on t
 ## Requirements
 
 - NVIDIA GPU with SM80 or newer (Ampere and later).
-- CUDA toolkit 13.0+, CMake 3.26+, Ninja.
+- CUDA toolkit 13.0+, a C++ compiler, CMake 3.26+, and Ninja for builds.
 - uv for Python environment management and builds.
-- PyTorch 2.10+ for the Python package.
+- Python 3.10+ and CUDA-enabled PyTorch 2.10+ for the Python package.
 - Weight shapes: `N` (out_features) a multiple of 16, `K` (in_features) a
   multiple of 64.
 
 ## Install
 
 ```bash
+uv pip install nf12
+```
+
+Linux x86-64 and ARM64 wheels include kernels for SM80, 86, 89, 90, 100, 110,
+and 120. They bundle the CUDA 13 runtime and require a compatible NVIDIA driver.
+
+From source:
+
+```bash
 uv sync --locked                          # all supported architectures
 NF12_CUDA_ARCHS=120 uv sync --locked      # one architecture for development
+```
+
+To defer compilation until the first native operation:
+
+```bash
+NF12_BUILD_NATIVE=OFF uv sync --locked
 ```
 
 You can build the C library alone with CMake:
