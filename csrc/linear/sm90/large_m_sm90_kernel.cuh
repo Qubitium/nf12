@@ -126,6 +126,8 @@ __global__ void __launch_bounds__(kThreads, 1)
                         const __grid_constant__ typename Prob::Params p) {
   using C = Cfg<BN, BM, SX, S, Prob::kExtraBytes, WK>;
 #if defined(NF12_SM90_DEVICE)
+  static_assert(C::kSmemBytes > 0 && Prob::kXArrivals > 0 && (Prob::kXWarp || Prob::kXArrivals == 1) &&
+                (Prob::kXWarp || Prob::kXWarps == 1) && Prob::kXWarps >= 1 && Prob::kXWarps <= 3);
   using namespace sm90;
   constexpr int SW = C::SW;
   constexpr int RB = C::RB;
@@ -466,8 +468,7 @@ __global__ void __launch_bounds__(kThreads, 1)
     prob.template epilogue<C, RB, TF>(acc, w, cw, lane, valid_rb);
   }
 #else
-  static_assert(C::kSmemBytes > 0 && Prob::kXArrivals > 0 && (Prob::kXWarp || Prob::kXArrivals == 1) &&
-                (Prob::kXWarp || Prob::kXWarps == 1) && Prob::kXWarps >= 1 && Prob::kXWarps <= 3);
+  static_assert(C::kSmemBytes > 0);
   __trap();  // never launched: the *_supported() probes reject images without the SM90 body
 #endif
 }

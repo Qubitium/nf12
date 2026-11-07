@@ -63,7 +63,6 @@ __device__ __forceinline__ void cp_async_16_zfill(uint32_t dst, const void* src,
 __device__ __forceinline__ void ldmatrix_x2(uint32_t (&r)[2], uint32_t saddr) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];" : "=r"(r[0]), "=r"(r[1]) : "r"(saddr));
 }
-#endif
 
 // Stores one C fragment's (row, row + 8) x (tok, tok + 1) values + bias.
 __device__ __forceinline__ void store_frag(const NarrowParams& p, int row, int tok, float4 v) {
@@ -82,6 +81,7 @@ __device__ __forceinline__ void store_frag(const NarrowParams& p, int row, int t
     y[p.ldy + 8] = __float2bfloat16_rn(v.w + b_hi);
   }
 }
+#endif
 
 template <WeightSource S, int TF, int W>
 __global__ void __launch_bounds__(32 * W) narrow_kernel(const __grid_constant__ NarrowParams p) {

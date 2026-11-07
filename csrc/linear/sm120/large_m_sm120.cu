@@ -25,7 +25,7 @@ namespace {
 using sm120k::kThreads;
 constexpr int kMaxDevices = 64;  // per-device host caches
 
-struct Params {
+struct DenseParams {
   const uint4* escapes;
   uint32_t num_escapes;
   uint32_t base_x4;
@@ -56,7 +56,7 @@ __device__ __forceinline__ uint64_t stream_k_tag(int tile, int kb0) {
 
 class DenseProblem {
  public:
-  using Params = ::nf12::detail::Params;
+  using Params = DenseParams;
   struct Work {
     int tile, kb0, kb1;
     int nt, mt;
@@ -386,7 +386,7 @@ cudaError_t launch(const LinearArgs& a, const Plan& pl) {
       return cudaErrorInvalidValue;
   }
 
-  Params p{};
+  DenseParams p{};
   p.escapes = a.escapes;
   p.num_escapes = a.escapes != nullptr ? a.num_escapes : 0;
   p.base_x4 = exp_base_x4(a.exp_base);

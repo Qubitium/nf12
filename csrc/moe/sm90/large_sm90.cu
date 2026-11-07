@@ -68,12 +68,13 @@ class MoeProblem {
     const uint4* escapes;
   };
   static constexpr int kExtraBytes = (kBarOffset + 16 * kSlots + 15) / 16 * 16;
+
+#if defined(NF12_SM90_DEVICE)
   static constexpr bool kXWarp = true;
   static constexpr int kXWarps = 3;  // producer warps 1-3 gather the rows
   static constexpr bool kXTensorMap = false;
   static constexpr int kXArrivals = 32 * kXWarps;  // every gathering thread's cp.async arrive
 
-#if defined(NF12_SM90_DEVICE)
   __device__ static void init(uint32_t extra) {
     for (int s = 0; s < kSlots; ++s) {
       sm90::mbar_init(extra + kBarOffset + 8 * s, 32);                                  // producer lanes
@@ -213,7 +214,9 @@ class MoeProblem {
 // Consumers reuse the last activation stage for the epilogue map.
 template <int BM>
 class MoeClusterProblem {
+#if defined(NF12_SM90_DEVICE)
   static constexpr int kPair = 2 * BM;  // rows of a cluster's m-tile
+#endif
   static constexpr int kSchedBytes = 4 * moe_schedule_smem_ints(kMoeSm90MaxExperts);
 
  public:
@@ -228,11 +231,12 @@ class MoeClusterProblem {
     const uint4* escapes;
   };
   static constexpr int kExtraBytes = (kSchedBytes + 15) / 16 * 16;
+
+#if defined(NF12_SM90_DEVICE)
   static constexpr bool kXWarp = false;
   static constexpr bool kXTensorMap = true;
   static constexpr int kXArrivals = 1;  // the TMA issuer's expect_tx
 
-#if defined(NF12_SM90_DEVICE)
   __device__ static void init(uint32_t) {}
 
   // All CTA threads must participate in the schedule scan's barriers.

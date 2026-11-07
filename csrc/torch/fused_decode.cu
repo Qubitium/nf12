@@ -244,9 +244,11 @@ constexpr int down_core_bytes(int parts) {
   return 2 * kXStride > partials ? 2 * kXStride : partials;
 }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 __device__ __forceinline__ float round_assignment(float sum, float scale) {
   return __bfloat162float(__float2bfloat16_rn(__fmul_rn(sum, scale)));
 }
+#endif
 
 // Each cluster rank owns a top-k slot, including repeated or dropped IDs.
 template <WeightSource S, int Stages, int Parts>

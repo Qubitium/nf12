@@ -63,13 +63,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
 
 option(NF12_BUILD_TORCH "Build the torch extension (libnf12_torch.so)" ON)
 
 # --use_fast_math would violate the numerical contract in SPEC.md section 6.
-set(NF12_CUDA_FLAGS -O3 -lineinfo --expt-relaxed-constexpr -Xfatbin=-compress-all)
+# NVCC's warning policy does not cover the host compiler or PTX assembler.
+set(NF12_CUDA_FLAGS -O3 -lineinfo --expt-relaxed-constexpr -Xfatbin=-compress-all
+  -Xcompiler=-Werror -Xptxas=--warning-as-error)
 
 file(GLOB_RECURSE NF12_KERNEL_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/csrc/codec/*.cu"
