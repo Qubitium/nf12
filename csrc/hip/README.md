@@ -116,16 +116,16 @@ model does.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096×4096 | 0.84 / 1.16 | 0.67 / 1.05 | 0.89 / 1.10 | 0.72 / 1.06 | 0.65 / 0.93 | 0.66 / 0.69 |
-| 4096×14336 | 1.33 / 1.33 | 1.19 / 1.19 | 1.24 / 1.23 | 1.18 / 1.16 | 1.16 / 1.16 | 0.82 / 0.76 |
-| 14336×4096 | 1.35 / 1.33 | 1.22 / 1.21 | 1.33 / 1.33 | 1.24 / 1.24 | 1.20 / 1.21 | 1.08 / 1.06 |
-| 4096×28672 | 1.33 / 1.33 | 1.22 / 1.21 | 1.14 / 1.14 | 1.07 / 1.07 | 0.96 / 0.96 | 0.75 / 0.68 |
-| 5120×25600 | 1.38 / 1.38 | 1.30 / 1.30 | 1.21 / 1.21 | 1.14 / 1.13 | 1.04 / 1.04 | 0.80 / 0.74 |
-| 25600×5120 | 1.33 / 1.33 | 1.15 / 1.15 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.20 | 1.20 / 1.11 |
-| 8192×8192 | 1.64 / 1.62 | 1.09 / 1.09 | 1.29 / 1.29 | 1.28 / 1.28 | 1.24 / 1.24 | 0.79 / 0.71 |
-| 8192×57344 | 1.41 / 1.40 | 1.23 / 1.23 | 1.22 / 1.22 | 1.21 / 1.21 | 1.15 / 1.14 | 0.77 / 0.74 |
-| 2048×8192 | 1.33 / 1.30 | 0.80 / 1.05 | 1.03 / 1.23 | 0.94 / 1.18 | 0.74 / 1.11 | 0.66 / 0.74 |
-| 896×4864 | 1.63 / 1.72 | 0.83 / 0.87 | 1.25 / 1.25 | 1.21 / 1.63 | 0.80 / 1.34 | 0.51 / 0.74 |
+| 4096×4096 | 1.20 / 1.26 | 0.94 / 1.17 | 0.88 / 1.08 | 0.76 / 1.08 | 0.68 / 0.96 | 0.69 / 0.69 |
+| 4096×14336 | 1.33 / 1.33 | 1.29 / 1.29 | 1.23 / 1.23 | 1.17 / 1.16 | 1.16 / 1.15 | 0.82 / 0.74 |
+| 14336×4096 | 1.35 / 1.33 | 1.31 / 1.30 | 1.32 / 1.32 | 1.24 / 1.25 | 1.20 / 1.21 | 1.11 / 1.05 |
+| 4096×28672 | 1.34 / 1.34 | 1.30 / 1.31 | 1.14 / 1.14 | 1.07 / 1.06 | 0.96 / 0.96 | 0.75 / 0.69 |
+| 5120×25600 | 1.38 / 1.38 | 1.36 / 1.36 | 1.21 / 1.21 | 1.14 / 1.14 | 1.04 / 1.04 | 0.79 / 0.77 |
+| 25600×5120 | 1.33 / 1.33 | 1.31 / 1.30 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.20 | 1.18 / 1.10 |
+| 8192×8192 | 1.71 / 1.69 | 1.27 / 1.27 | 1.29 / 1.28 | 1.28 / 1.28 | 1.24 / 1.24 | 0.80 / 0.73 |
+| 8192×57344 | 1.40 / 1.41 | 1.32 / 1.32 | 1.22 / 1.22 | 1.21 / 1.20 | 1.16 / 1.14 | 0.77 / 0.74 |
+| 2048×8192 | 1.38 / 1.36 | 0.97 / 1.22 | 1.01 / 1.23 | 0.93 / 1.20 | 0.73 / 1.11 | 0.65 / 0.74 |
+| 896×4864 | 1.69 / 1.82 | 0.97 / 1.03 | 1.27 / 1.26 | 1.20 / 1.64 | 0.80 / 1.38 | 0.52 / 0.74 |
 
 Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
 output-rounding floor. The fused linear has **0 violations** of
@@ -133,8 +133,48 @@ output-rounding floor. The fused linear has **0 violations** of
 
 The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
 `m=8` upward on weights large enough that the packed read dominates. Across the
-seven 14336/25600/57344-wide shapes it is 1.07–1.35× at `m=16..32` and
-0.96–1.24× at `m=64`.
+seven 14336/25600/57344-wide shapes it is 1.13–1.35× at `m=8..32` and
+0.96–1.24× at `m=64`. At `m=1` every shape is now above parity (1.20–1.71×).
+
+### Small batches: the fused path is specialized on the token count
+
+`m <= 15` runs the fused kernel, which decodes each 16×64 super-atom once and
+dots it against every token in flight. It used to take `m` as a runtime
+argument, so `acc[16][2]` was indexed dynamically — which keeps the array out of
+VGPRs — and the warp-partial plane was always sized for 16 tokens. Making the
+token count a template parameter fixes both and fully unrolls the token loop.
+
+At `m=1` that raises occupancy enough to hurt: the kernel then runs eight CTAs
+per CU and 256 concurrent packed streams, which thrashes the 64 MiB LLC.
+Over-allocating the partial plane to 32 KiB throttles it to two CTAs per CU,
+which is worth 1.40× on `4096×4096` and 1.05× on `2048×8192`.
+
+Same-process A/B of the old and new fused kernel (µs, lower is better):
+
+| k × n | m | before | after | gain |
+| --- | ---: | ---: | ---: | ---: |
+| 4096×4096 | 1 | 28.57 | 20.45 | **1.40×** |
+| 4096×4096 | 8 | 32.58 | 24.15 | **1.35×** |
+| 2048×8192 | 1 | 19.44 | 18.49 | **1.05×** |
+| 2048×8192 | 8 | 31.95 | 23.87 | **1.34×** |
+| 896×4864 | 1 | 8.36 | 8.08 | 1.03× |
+| 896×4864 | 8 | 15.40 | 11.57 | **1.33×** |
+| 4096×14336 | 8 | 161.67 | 149.18 | **1.08×** |
+| 25600×5120 | 8 | 364.93 | 323.03 | **1.13×** |
+
+Warm ratio against dense BF16, before → after:
+
+| k × n | m=1 | m=8 |
+| --- | ---: | ---: |
+| 4096×4096 | 0.84 → **1.20** | 0.67 → **0.94** |
+| 2048×8192 | 1.33 → **1.38** | 0.80 → **0.97** |
+| 896×4864 | 1.63 → **1.69** | 0.83 → **0.97** |
+| 4096×28672 | 1.33 → **1.34** | 1.22 → **1.30** |
+| 25600×5120 | 1.33 → **1.33** | 1.15 → **1.31** |
+| 8192×8192 | 1.64 → **1.71** | 1.09 → **1.27** |
+
+`m=16` still routes to the matrix-core kernel, which is 1.2–2.3× faster than the
+fused one there on every measured shape.
 
 ### Small weights: four fixes that took them from ~0.5× to parity
 

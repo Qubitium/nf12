@@ -85,18 +85,28 @@ byte-identical to the reference codec, and fused linear has 0 violations of
 `|err| <= 2e-3 + 2e-3*|ref|` over 21 shapes for
 `m ∈ {1,16,17,32,33,48,64,96,128,256}` (`rms_rel ~1.66e-3`, the FP64 oracle's
 own BF16 rounding floor). Against a dense BF16 GEMM, on the same `k x n` grid
-as the CUDA benchmarks (`bench/common.py`), the HIP kernel is 1.14-1.35x faster
-at `m=16..64` for the large 14336/25600/57344-wide weights. On the small
-weights four fixes — storing straight out of the decoder's layout (no
-`ds_bpermute` transpose, conflict-free `STS.32`), a padded shared stride,
+as the CUDA benchmarks (`bench/common.py`), the HIP kernel is 1.13-1.35x faster
+at `m=8..32` for the large 14336/25600/57344-wide weights, and 0.96-1.24x at
+`m=64`.
+
+Small batches got their own pass. The `m <= 15` fused kernel now takes the token
+count as a template parameter, so its accumulator and warp-partial plane are
+compile-time sized instead of dynamically indexed and always 16 tokens wide; at
+`m=1` the partial plane is deliberately over-allocated to throttle occupancy,
+because eight CTAs per CU thrashes the 64 MiB LLC. That took `4096x4096` from
+0.84x to 1.20x at `m=1` and from 0.67x to 0.94x at `m=8`, `2048x8192` from
+0.80x to 0.97x and `896x4864` from 0.83x to 0.97x at `m=8`. Every shape is now
+above parity at `m=1` (1.20-1.71x).
+
+The small-weight work at `m=16` — storing straight out of the decoder's layout
+(no `ds_bpermute` transpose, conflict-free `STS.32`), a padded shared stride,
 hoisting the loads over the mma, and capping the split-K reduce grid at 128
-blocks — took `896x4864` from 0.62x to 1.25x, `2048x8192` from 0.66x to 1.03x
-and `4096x4096` from 0.48x to 0.89x at `m=16`. All three are at or above parity
-on the cold (cache-cycling) path at `m=16` (1.10x / 1.23x / 1.25x);
-warm, `4096x4096` still sits at 0.89x at `m=16` because 32 CTAs is one per CU,
-so the kernel is memory-latency-bound against the 64 MiB Infinity Cache.
-`m=128` on the large shapes stays 0.75-1.20x because rocBLAS is already near
-the HBM roofline.
+blocks — took `896x4864` from 0.62x to 1.27x, `2048x8192` from 0.66x to 1.01x
+and `4096x4096` from 0.48x to 0.88x. All three are at or above parity on the
+cold (cache-cycling) path at `m=16` (1.26x / 1.23x / 1.08x); warm, `4096x4096`
+still sits at 0.88x because 32 CTAs is one per CU, so the kernel is
+memory-latency-bound against the 64 MiB Infinity Cache. `m=128` on the large
+shapes stays 0.75-1.20x because rocBLAS is already near the HBM roofline.
 
 Full tables and porting notes are in
 [`csrc/hip/README.md`](csrc/hip/README.md).
