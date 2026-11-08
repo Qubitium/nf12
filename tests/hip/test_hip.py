@@ -159,6 +159,22 @@ def test_selftest(lib):
     assert int(out.item()) == 0x4E463132
 
 
+def test_library_path_is_stable_across_threads(lib):
+    """The JIT cache and loader locks are free-threaded safe."""
+    paths: list = [None] * 8
+
+    def run(i: int) -> None:
+        paths[i] = nf12.library_path()
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(len(paths))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert all(path == paths[0] for path in paths)
+    assert paths[0].name == "libnf12_hip.so"
+
+
 def test_route_bounds(lib):
     assert lib.nf12_hip_wmma_max_m() >= 64
     assert lib.nf12_hip_linear_fused_small_m_supported(1) == 1

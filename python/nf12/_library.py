@@ -43,8 +43,10 @@ def library_path(name: str | None = None) -> Path:
 def load() -> None:
     """Idempotently loads the torch extension (``torch.ops.nf12``) on first use."""
     global _loaded
-    if _loaded:
-        return
+    # Take the lock even on the fast path. Under a free-threaded (GIL=0) build
+    # two threads can reach an unlocked `if _loaded` together; both would then
+    # call torch.ops.load_library and register the fake kernels twice, which is
+    # not idempotent. The lock is uncontended after the first call.
     with _lock:
         if _loaded:
             return
