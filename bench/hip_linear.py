@@ -156,7 +156,8 @@ def main() -> None:
             err = (got.double() - ref.double()).abs()
             viol = int(((err > 2e-3 + 2e-3 * ref.double().abs()) | ~torch.isfinite(got)).sum())
             rms = (err.pow(2).mean().sqrt() / ref.double().pow(2).mean().sqrt()).item()
-            tn = best(lambda x=x: linear(x, p0, e0, b0, ws, ws_bytes))
+            tn = best(lambda x=x, p0=p0, e0=e0, b0=b0, ws=ws, ws_bytes=ws_bytes:
+                      linear(x, p0, e0, b0, ws, ws_bytes))
             tb = best(lambda x=x, w0=w0: F.linear(x, w0))
 
             def cold_n(sets=sets, x=x, ws=ws, ws_bytes=ws_bytes):
