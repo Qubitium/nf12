@@ -107,6 +107,13 @@ def _cache_key(source: Path, archs: list[int]) -> str:
         "environment": {name: os.environ.get(name) for name in _BUILD_ENV},
         "source_path": str(source.resolve()),
     }
+    if _is_hip():
+        # A different ROCm compiler emits different device code, so it must
+        # invalidate the cache exactly like CUDACXX does on the CUDA path.
+        # ``_hip_compiler`` resolves the same precedence the build uses
+        # (CMAKE_HIP_COMPILER, then PATH, then ROCM_PATH/HIP_PATH).
+        identity["hip_compiler"] = _hip_compiler()
+        identity["hip_toolkit"] = torch.version.hip
     digest.update(json.dumps(identity, sort_keys=True).encode())
     digest.update(Path(__file__).read_bytes())
     files = [source / "CMakeLists.txt"]
