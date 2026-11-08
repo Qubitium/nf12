@@ -102,6 +102,18 @@ def lib():
         _VOID, _I64, _I64, ctypes.POINTER(_Nf12Weight), _VOID, _VOID, _I64,
         _VOID, _SIZE, _VOID,
     ]
+    lib.nf12_decode.restype = _INT
+    lib.nf12_decode.argtypes = [ctypes.POINTER(_Nf12Weight), _VOID, _I64, _VOID]
+    lib.nf12_moe_combine.restype = _INT
+    lib.nf12_moe_combine.argtypes = [_VOID, _I64, _I64, _I64, _I64, _VOID, _I64, _VOID]
+    lib.nf12_moe_silu_mul.restype = _INT
+    lib.nf12_moe_silu_mul.argtypes = [_VOID, _I64, _I64, _I64, _VOID, _I64, _VOID]
+    lib.nf12_packed_bytes.restype = _SIZE
+    lib.nf12_packed_bytes.argtypes = [_I64, _I64]
+    lib.nf12_bf16t_bytes.restype = _SIZE
+    lib.nf12_bf16t_bytes.argtypes = [_I64, _I64]
+    lib.nf12_encode_workspace_bytes.restype = _SIZE
+    lib.nf12_encode_workspace_bytes.argtypes = [_I64, _I64]
     return lib
 
 
@@ -338,6 +350,45 @@ def test_c_abi_workspace_status_matches_cuda(lib):
     assert call(None, need) == nf12_invalid
     workspace = torch.empty(need, dtype=torch.uint8, device="cuda")
     assert call(workspace.data_ptr(), need) == nf12_ok
+
+
+def test_c_abi_validates_like_cuda(lib):
+    """The C ABI must reject bad arguments instead of crashing or truncating.
+
+    Regressions for four defects against csrc/api.cu: a null weight segfaulted
+    in ``nf12_decode``; a null output returned NF12_OK and faulted
+    asynchronously in ``nf12_decode``/``nf12_moe_combine``/``nf12_moe_silu_mul``;
+    ``m == 0`` reported INVALID_ARGUMENT where CUDA returns NF12_OK; and a ``k``
+    that was not a multiple of 64 silently truncated the GEMM to k/64 columns
+    instead of being rejected.
+    """
+    nf12_ok, nf12_invalid = 0, 1
+    n, k = 256, 256
+    out = torch.empty((n, k), dtype=torch.bfloat16, device="cuda")
+    y = torch.empty((64, n), dtype=torch.bfloat16, device="cuda")
+
+    # Null pointers are rejected, not dereferenced.
+    assert lib.nf12_decode(None, out.data_ptr(), k, _stream()) == nf12_invalid
+    assert lib.nf12_moe_combine(None, n, 4, 2, n, out.data_ptr(), n, _stream()) == nf12_invalid
+    assert lib.nf12_moe_combine(out.data_ptr(), n, 4, 2, n, None, n, _stream()) == nf12_invalid
+    assert lib.nf12_moe_silu_mul(None, 2 * k, 4, k, out.data_ptr(), k, _stream()) == nf12_invalid
+
+    # m == 0 is a successful no-op, exactly as on CUDA.
+    torch.manual_seed(41)
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = _encode(lib, w)
+    view = _Nf12Weight(packed.data_ptr(), escapes.data_ptr(), escapes.shape[0], n, k, exp_base)
+    assert lib.nf12_linear(None, 0, k, ctypes.byref(view), None, y.data_ptr(), n,
+                           None, 0, _stream()) == nf12_ok
+
+    # Geometry that would truncate is rejected instead.
+    assert lib.nf12_packed_bytes(-1, 64) == 0
+    assert lib.nf12_bf16t_bytes(-1, 64) == 0
+    assert lib.nf12_encode_workspace_bytes(24, 64) == 0
+    assert lib.nf12_encode_workspace_bytes(256, 96) == 0
+    x96 = torch.empty((16, 96), dtype=torch.bfloat16, device="cuda")
+    assert lib.nf12_linear(x96.data_ptr(), 16, 96, ctypes.byref(view), None, y.data_ptr(),
+                           n, None, 0, _stream()) == nf12_invalid
 
 
 def test_wmma_concurrent_streams_are_independent(lib):

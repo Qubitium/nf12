@@ -576,7 +576,11 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   if constexpr (Src == WeightSource::kNf12) {
     if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   }
-  if (n % kSuperAtomRows != 0) return hipErrorInvalidValue;
+  // Both strides are used as k / 64 and n / 16 below, so a shape that is not a
+  // multiple would truncate rather than fail.
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0) {
+    return hipErrorInvalidValue;
+  }
 
   int tiles, splits;
   int64_t m_blocks;
