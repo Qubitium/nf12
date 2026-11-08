@@ -116,16 +116,16 @@ model does.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096×4096 | 0.85 / 1.17 | 0.70 / 0.99 | 0.54 / 1.03 | 0.47 / 0.97 | 0.48 / 0.89 | 0.55 / 0.67 |
-| 4096×14336 | 1.33 / 1.32 | 1.19 / 1.19 | 1.26 / 1.23 | 1.24 / 1.23 | 1.19 / 1.20 | 0.85 / 0.85 |
-| 14336×4096 | 1.35 / 1.34 | 1.22 / 1.21 | 1.20 / 1.20 | 1.13 / 1.15 | 1.12 / 1.19 | 0.86 / 0.88 |
-| 4096×28672 | 1.34 / 1.34 | 1.21 / 1.21 | 1.26 / 1.26 | 1.24 / 1.25 | 1.19 / 1.21 | 0.79 / 0.74 |
-| 5120×25600 | 1.39 / 1.39 | 1.30 / 1.30 | 1.28 / 1.28 | 1.26 / 1.26 | 1.22 / 1.23 | 0.83 / 0.79 |
-| 25600×5120 | 1.33 / 1.33 | 1.15 / 1.15 | 1.33 / 1.33 | 1.31 / 1.32 | 1.27 / 1.27 | 1.02 / 0.96 |
-| 8192×8192 | 1.65 / 1.64 | 1.09 / 1.10 | 1.22 / 1.21 | 1.16 / 1.16 | 1.10 / 1.11 | 0.90 / 0.89 |
-| 8192×57344 | 1.40 / 1.40 | 1.23 / 1.23 | 1.28 / 1.29 | 1.28 / 1.28 | 1.22 / 1.20 | 0.76 / 0.75 |
-| 2048×8192 | 1.33 / 1.30 | 0.78 / 1.05 | 0.83 / 1.11 | 0.77 / 1.07 | 0.65 / 1.00 | 0.63 / 0.75 |
-| 896×4864 | 1.65 / 1.93 | 0.71 / 0.92 | 0.83 / 1.23 | 0.91 / 1.51 | 0.69 / 1.26 | 0.51 / 0.70 |
+| 4096×4096 | 0.86 / 1.22 | 0.69 / 0.97 | 0.81 / 1.19 | 0.70 / 1.14 | 0.65 / 1.08 | 0.66 / 0.70 |
+| 4096×14336 | 1.33 / 1.32 | 1.19 / 1.20 | 1.24 / 1.22 | 1.17 / 1.16 | 1.14 / 1.16 | 0.79 / 0.80 |
+| 14336×4096 | 1.35 / 1.34 | 1.21 / 1.21 | 1.33 / 1.33 | 1.24 / 1.24 | 1.18 / 1.21 | 1.08 / 1.12 |
+| 4096×28672 | 1.34 / 1.34 | 1.21 / 1.22 | 1.14 / 1.14 | 1.08 / 1.08 | 0.97 / 0.97 | 0.75 / 0.68 |
+| 5120×25600 | 1.39 / 1.38 | 1.30 / 1.30 | 1.21 / 1.22 | 1.14 / 1.14 | 1.05 / 1.05 | 0.80 / 0.76 |
+| 25600×5120 | 1.33 / 1.33 | 1.15 / 1.15 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.19 | 1.13 / 1.16 |
+| 8192×8192 | 1.77 / 1.79 | 1.10 / 1.10 | 1.29 / 1.28 | 1.29 / 1.30 | 1.24 / 1.24 | 0.79 / 0.78 |
+| 8192×57344 | 1.40 / 1.40 | 1.23 / 1.23 | 1.22 / 1.22 | 1.22 / 1.22 | 1.15 / 1.15 | 0.78 / 0.74 |
+| 2048×8192 | 1.31 / 1.30 | 0.77 / 1.03 | 1.03 / 1.23 | 0.91 / 1.20 | 0.78 / 1.12 | 0.68 / 0.75 |
+| 896×4864 | 1.66 / 1.93 | 0.72 / 0.94 | 1.14 / 1.39 | 1.16 / 1.64 | 0.84 / 1.39 | 0.53 / 0.72 |
 
 Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
 output-rounding floor. The fused linear has **0 violations** of
@@ -133,41 +133,50 @@ output-rounding floor. The fused linear has **0 violations** of
 
 The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
 `m=8` upward on weights large enough that the packed read dominates.
-1.09–1.30× at `m=8..64` for the 14336/25600/57344-wide shapes and 1.20–1.33×
-at `m=16`.
+1.14–1.35× at `m=16..64` for the 14336/25600/57344-wide shapes.
 
-### Small weights: bank conflicts and split geometry
+### Small weights: three fixes that took them from ~0.5× to parity
 
 `4096×4096`, `2048×8192` and `896×4864` are the shapes whose dense BF16 weight
 fits in the 64 MiB Infinity Cache, so BF16 runs at ~1.4 TB/s and NF12 has to
-beat it while decoding. Two fixes moved them:
+beat it while decoding.
 
-* **Padded shared stride.** The decoded super-atom is 16×64 BF16, a 128-byte
-  row. Every lane in a row group then hits the same LDS banks: the store was
-  8-way conflicted and the B-fragment load 16-way. Eight BF16 of padding
-  (144-byte rows, 36 banks) turns that into 4-way / 2-way. It costs 4 KiB of
-  LDS per CTA, which drops the resident CTAs per CU from 4 to 3 — free while
-  the launch fits in three CTAs per CU, a loss beyond it — so the launcher
-  picks the padded variant only when `n_blocks * m_blocks <= 96`.
-* **Shape-aware split-K.** A split reads a disjoint K slice, so the packed
-  weight is never read twice; the cost is the per-split FP32 plane and the
-  reduce pass. The split is chosen from the CTA count, K length and M:
-  `896×4864` (7 CTAs) splits 8 ways, `14336×4096` / `25600×5120` split twice at
-  small M and once at `m=128`, and `4096×4096` does not split below `m=128`.
+1. **No transpose in the store.** `quad_transpose` is a 4×4 dword transpose
+   inside each 16-byte chunk: 16 `ds_bpermute_b32` plus 32 selects per
+   super-atom, all occupying the same LDS crossbar as the store and the
+   B-fragment load. It is self-inverse, so undoing it on the *address* is
+   equivalent — dword `d` of lane `l`'s chunk `(h,q)` belongs to dword
+   `lane&3` of chunk `d+4q` in row `(lane>>2)+8h`. That is 16 `STS.32` whose
+   bank is `4*(lane>>2) + (lane&3) + const`, i.e. all 32 banks exactly once.
+   The shuffles disappear and the store becomes conflict-free.
+2. **Padded shared stride.** The decoded super-atom is 16×64 BF16 — a
+   128-byte row — so with a plain 64 stride the B-fragment load hits 16-way.
+   Eight BF16 of padding (144-byte rows, 36 banks) brings it to the 4-cycle
+   hardware minimum. It costs 4 KiB of LDS per CTA (4→3 CTAs per CU), so it is
+   a template variant selected only when the launch fits in three CTAs per CU.
+3. **Load hoisted over the MMA.** The next super-atom's loads are issued
+   *before* the matrix-core work and decoded afterwards, so the L3 latency is
+   covered by the mma instead of stalling the decode. At `m=16` a 4096×4096
+   launch is only two warps per SIMD, which is not enough to hide it any other
+   way. This alone took 4096×4096 from 32.1 to 26.7 µs.
 
-Measured effect on the two worst shapes (warm, versus BF16):
+Split-K is picked per shape from the measured optima (see `pick_splits`): a
+narrow N splits 8 ways, a very wide N splits 2 ways at eight token tiles, and
+everything else stays unsplit.
 
 | k × n | m=16 before | m=16 after | m=64 before | m=64 after |
 | --- | ---: | ---: | ---: | ---: |
-| 4096×4096 | 0.48× | **0.54×** | 0.45× | **0.48×** |
-| 2048×8192 | 0.66× | **0.83×** | 0.59× | **0.65×** |
-| 896×4864 | 0.62× | **0.83×** | 0.50× | **0.69×** |
-| 25600×5120 | 1.15× | **1.33×** | 0.98× | **1.27×** |
+| 4096×4096 | 0.48× | **0.81×** | 0.45× | **0.65×** |
+| 2048×8192 | 0.66× | **1.03×** | 0.59× | **0.78×** |
+| 896×4864 | 0.62× | **1.14×** | 0.50× | **0.84×** |
+| 25600×5120 | 1.15× | **1.35×** | 0.98× | **1.21×** |
 
-They are still below 1.0 on the smallest weights: BF16 reads 32 MiB from L3 at
-~1.4 TB/s while the fused kernel decodes at ~0.5–0.8 TB/s of packed data, and
-the decode is the floor. `m=128` on the large shapes stays 0.79–0.90× because
-rocBLAS is already near the HBM roofline.
+`4096×4096` is the remaining one below parity at `m=16` (0.81×). Its 4096
+output columns give only 32 CTAs — one per CU, two warps per SIMD — and the
+kernel is then memory-latency-bound at ~0.8 TB/s of packed reads against a
+1.4 TB/s Infinity Cache. Splitting K adds the parallelism but its partial
+planes and reduce pass cost more than they buy at this size (measured s2 38.0
+vs s1 28.9 µs).
 
 ## Porting notes (NVIDIA → AMD)
 
