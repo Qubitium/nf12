@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
+# SPDX-License-Identifier: Apache-2.0
+"""C-ABI tests for the RDNA4 HIP library (``libnf12_hip.so``).
+
+The CUDA torch extension is not built on ROCm, so these tests drive the plain
+C API in ``include/nf12/nf12_hip.h`` through ctypes. Accuracy uses the same
+``|err| <= 2e-3 + 2e-3*|ref|`` gate as the CUDA tests, against an FP64 oracle.
+"""
+
+from __future__ import annotations
+
+import ctypes
+
+import nf12
+import pytest
+import torch
+from nf12 import reference
+
+
+def _arch() -> str:
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        return ""
+    return torch.cuda.get_device_properties(0).gcnArchName.split(":", 1)[0]
+
+
+pytestmark = pytest.mark.skipif(
+    _arch() not in ("gfx1200", "gfx1201"),
+    reason="requires an RDNA4 (gfx1200/gfx1201) ROCm device",
+)
+
+_VOID = ctypes.c_void_p
+_I64 = ctypes.c_int64
+_SIZE = ctypes.c_size_t
+_U8 = ctypes.c_uint8
+_U32 = ctypes.c_uint32
+_INT = ctypes.c_int
+
+
+@pytest.fixture(scope="module")
+def lib():
+    path = nf12.library_path()
+    assert path.name == "libnf12_hip.so", path
+    lib = ctypes.CDLL(str(path))
+    lib.nf12_hip_encode_workspace_bytes.restype = _SIZE
+    lib.nf12_hip_encode_workspace_bytes.argtypes = [_I64, _I64]
+    lib.nf12_hip_encode_analyze.restype = _INT
+    lib.nf12_hip_encode_analyze.argtypes = [
+        _VOID, _I64, _I64, _I64, _VOID, _SIZE,
+        ctypes.POINTER(_U8), ctypes.POINTER(_U32), _VOID,
+    ]
+    lib.nf12_hip_encode.restype = _INT
+    lib.nf12_hip_encode.argtypes = [
+        _VOID, _I64, _I64, _I64, _U8, _VOID, _VOID, _U32,
+        _VOID, _SIZE, _VOID,
+    ]
+    lib.nf12_hip_decode.restype = _INT
+    lib.nf12_hip_decode.argtypes = [
+        _VOID, _VOID, _U8, _I64, _I64, _VOID, _I64, _VOID,
+    ]
+    lib.nf12_hip_selftest.restype = _INT
+    lib.nf12_hip_selftest.argtypes = [_VOID, _VOID]
+    lib.nf12_hip_linear_fused_small_m_supported.restype = _INT
+    lib.nf12_hip_linear_fused_small_m_supported.argtypes = [_I64]
+    lib.nf12_hip_linear_fused.restype = _INT
+    lib.nf12_hip_linear_fused.argtypes = [
+        _VOID, _VOID, _U8, _VOID, _VOID, _I64, _I64, _I64, _VOID, _VOID,
+    ]
+    lib.nf12_hip_wmma_max_m.restype = _INT
+    lib.nf12_hip_wmma_max_m.argtypes = []
+    lib.nf12_hip_wmma_supported.restype = _INT
+    lib.nf12_hip_wmma_supported.argtypes = [_I64]
+    lib.nf12_hip_linear_wmma.restype = _INT
+    lib.nf12_hip_linear_wmma.argtypes = [
+        _VOID, _VOID, _U8, _VOID, _VOID, _I64, _I64, _I64, _VOID, _VOID,
+    ]
+    return lib
+
+
+def _stream() -> int:
+    return torch.cuda.current_stream().cuda_stream
+
+
+def _encode(lib, w: torch.Tensor):
+    n, k = w.shape
+    ws_bytes = lib.nf12_hip_encode_workspace_bytes(n, k)
+    ws = torch.empty(max(ws_bytes, 1), dtype=torch.uint8, device=w.device)
+    eb = _U8(0)
+    ne = _U32(0)
+    rc = lib.nf12_hip_encode_analyze(
+        w.data_ptr(), n, k, k, ws.data_ptr(), ws_bytes,
+        ctypes.byref(eb), ctypes.byref(ne), _stream(),
+    )
+    assert rc == 0, rc
+    packed = torch.empty((n, k * 3 // 2), dtype=torch.uint8, device=w.device)
+    escapes = torch.empty((int(ne.value), 8), dtype=torch.int16, device=w.device)
+    rc = lib.nf12_hip_encode(
+        w.data_ptr(), n, k, k, eb, packed.data_ptr(), escapes.data_ptr(),
+        int(ne.value), ws.data_ptr(), ws_bytes, _stream(),
+    )
+    assert rc == 0, rc
+    return packed, escapes, int(eb.value)
+
+
+def _decode(lib, packed, escapes, exp_base):
+    n, row_bytes = packed.shape
+    k = row_bytes * 2 // 3
+    out = torch.empty((n, k), dtype=torch.bfloat16, device=packed.device)
+    rc = lib.nf12_hip_decode(
+        packed.data_ptr(), escapes.data_ptr(), exp_base, n, k, out.data_ptr(), k,
+        _stream(),
+    )
+    assert rc == 0, rc
+    return out
+
+
+def _linear(lib, x, packed, escapes, exp_base):
+    m, k = x.shape
+    n = packed.shape[0]
+    out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
+    if m <= 16:
+        rc = lib.nf12_hip_linear_fused(
+            packed.data_ptr(), escapes.data_ptr(), exp_base, x.data_ptr(),
+            out.data_ptr(), n, k, m, None, _stream(),
+        )
+    else:
+        rc = lib.nf12_hip_linear_wmma(
+            packed.data_ptr(), escapes.data_ptr(), exp_base, x.data_ptr(),
+            out.data_ptr(), n, k, m, None, _stream(),
+        )
+    assert rc == 0, rc
+    return out
+
+
+def _violations(got, ref) -> int:
+    err = (got.double() - ref).abs()
+    tol = 2e-3 + 2e-3 * ref.abs()
+    return int((err > tol).sum())
+
+
+def test_selftest(lib):
+    out = torch.zeros(1, dtype=torch.uint32, device="cuda")
+    rc = lib.nf12_hip_selftest(out.data_ptr(), _stream())
+    assert rc == 0
+    assert int(out.item()) == 0x4E463132
+
+
+def test_route_bounds(lib):
+    assert lib.nf12_hip_wmma_max_m() >= 64
+    assert lib.nf12_hip_linear_fused_small_m_supported(1) == 1
+    assert lib.nf12_hip_linear_fused_small_m_supported(16) == 1
+
+
+@pytest.mark.parametrize("n,k", [(16, 64), (256, 256), (1024, 4096)])
+def test_encode_matches_reference(lib, n, k):
+    torch.manual_seed(0)
+    w = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    packed, escapes, exp_base = _encode(lib, w)
+    ref_packed, ref_escapes, ref_base = reference.encode(w.cpu())
+    assert exp_base == ref_base
+    assert torch.equal(packed.cpu(), ref_packed)
+    assert torch.equal(escapes.cpu(), ref_escapes)
+
+
+def test_decode_is_bit_exact(lib):
+    torch.manual_seed(1)
+    w = torch.randn(16, 64, dtype=torch.bfloat16, device="cuda")
+    specials = torch.tensor(
+        [0x0000, 0x8000, 0x0001, 0x007F, 0x7F80, 0xFF80, 0x7FC0, 0x7FFF,
+         0xFFC0, 0x3F80, 0xBF80, 0x0002, 0x0080, 0x7F7F, 0xFF7F, 0x3F00],
+        dtype=torch.uint16,
+    ).view(torch.int16)
+    w.view(torch.int16).view(-1)[: specials.numel()] = specials
+    packed, escapes, exp_base = _encode(lib, w)
+    got = _decode(lib, packed, escapes, exp_base)
+    assert torch.equal(got.view(torch.int16), w.view(torch.int16))
+
+
+@pytest.mark.parametrize("n,k", [(256, 256), (1024, 4096)])
+@pytest.mark.parametrize("m", [1, 4, 16])
+def test_fused_linear_matches_fp64_oracle(lib, n, k, m):
+    torch.manual_seed(m)
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = _encode(lib, w)
+    ref = x.double() @ w.double().t()
+    assert _violations(_linear(lib, x, packed, escapes, exp_base), ref) == 0
+
+
+@pytest.mark.parametrize("m", [17, 32, 64, 128])
+def test_wmma_linear_matches_fp64_oracle(lib, m):
+    if lib.nf12_hip_wmma_supported(m) == 0:
+        pytest.skip(f"wmma path not available for m={m}")
+    torch.manual_seed(m)
+    n, k = 1024, 4096
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = _encode(lib, w)
+    ref = x.double() @ w.double().t()
+    assert _violations(_linear(lib, x, packed, escapes, exp_base), ref) == 0

@@ -106,28 +106,36 @@ an empty translation unit there and `nf12_hip_wmma_supported` returns 0.
 
 ## Performance (R9700, `gfx1201`, 32 CUs, wave32)
 
-Versus `torch.nn.functional.linear` on the dense BF16 weight. Two regimes,
-because the answer depends on whether the weight fits in the 64 MiB Infinity
-Cache (MALL):
+Versus `torch.nn.functional.linear` on the dense BF16 weight, on the same
+`k × n` grid as the CUDA benchmarks (`bench/common.py`). Each cell is
+**warm / cold**: *warm* reuses one weight in a loop, *cold* cycles several
+weights so the working set exceeds 96 MiB, which is what a real multi-layer
+model does.
 
-| N | m | warm | cold |
-| ---: | ---: | ---: | ---: |
-| 11008 | 17 | **1.44×** | **1.18×** |
-| 11008 | 32 | **1.44×** | **1.18×** |
-| 11008 | 64 | **1.41×** | **1.19×** |
-| 11008 | 96 | **1.30×** | **1.16×** |
-| 11008 | 128 | 0.91× | 0.83× |
-| 4096 | 17 | 0.56× | **1.06×** |
-| 4096 | 64 | 0.42× | 0.77× |
-| 4096 | 128 | 0.64× | 0.62× |
+| k × n | m=1 | m=16 | m=32 | m=64 | m=128 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 896×4864 | 1.62× / 1.71× | 0.54× / 0.65× | 0.70× / 0.99× | 0.50× / 0.76× | 0.53× / 0.74× |
+| 2048×8192 | 1.28× / 1.30× | 0.47× / 0.86× | 0.66× / 1.06× | 0.61× / 0.98× | 0.64× / 0.74× |
+| 4096×4096 | 0.84× / 1.16× | 0.42× / 0.89× | 0.40× / 0.83× | 0.42× / 0.75× | 0.65× / 0.66× |
+| 4096×14336 | 1.33× / 1.32× | 1.02× / 1.05× | 1.24× / 1.23× | 1.19× / 1.18× | 0.86× / 0.85× |
+| 4096×28672 | 1.34× / 1.33× | 1.10× / 1.12× | 1.26× / 1.26× | 1.23× / 1.23× | 0.78× / 0.73× |
+| 5120×25600 | 1.38× / 1.39× | 1.17× / 1.19× | 1.26× / 1.27× | 1.22× / 1.21× | 0.83× / 0.79× |
+| 8192×8192 | 1.70× / 1.61× | 0.92× / 0.93× | 1.16× / 1.16× | 1.09× / 1.08× | 0.68× / 0.67× |
+| 8192×57344 | 1.41× / 1.40× | 1.18× / 1.17× | 1.27× / 1.27× | 1.22× / 1.19× | 0.76× / 0.73× |
+| 14336×4096 | 1.35× / 1.32× | 0.96× / 1.00× | 1.12× / 1.12× | 1.10× / 1.14× | 0.79× / 0.78× |
+| 25600×5120 | 1.33× / 1.33× | 0.88× / 0.89× | 1.10× / 1.10× | 1.00× / 0.99× | 0.84× / 0.77× |
 
-*Warm* reuses one weight in a loop; *cold* cycles several weights so the working
-set exceeds 96 MiB, which is what a real multi-layer model does.
+Accuracy on every row: `rms_rel ≈ 1.66e-3` (min 1.63e-3, max 1.68e-3), the
+BF16 output-rounding floor. The fused linear has **0 violations** of
+`|err| <= 2e-3 + 2e-3*|ref|` on the project's scaled accuracy harness.
 
-At 11008×4096 the kernel runs at **~640 GB/s against a measured 633 GB/s HBM
-read ceiling**, so the win is bandwidth. At 4096² the BF16 weight is 32 MiB and
-therefore cache-resident at ~1.4 TB/s, where a 1.33× traffic saving cannot pay
-for the decode — that is a property of the shape, not a tuning gap.
+The win is bandwidth: NF12 reads 25% fewer weight bytes. It pays off at `m=1`
+(1.28–1.70× on every shape except `4096×4096` warm) and at `m=32/64` for large
+weights (1.09–1.27×). `m=16` is the weak spot of the small-M fused kernel
+(0.42–1.18×), and `m=128` loses to rocBLAS almost everywhere (0.53–0.86×).
+`4096×4096` loses because its 32 MiB BF16 weight is cache-resident at
+~1.4 TB/s, where the traffic saving cannot pay for the decode — a property of
+the shape, not a tuning gap.
 
 ## Porting notes (NVIDIA → AMD)
 
