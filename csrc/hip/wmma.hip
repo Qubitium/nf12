@@ -475,8 +475,8 @@ static bool wmma_available() {
 //   4096x4096    32 CTAs,  64 k-blocks   s4 / s2
 //   4096x14336  112 CTAs,  64 k-blocks   s1 / s1
 //   14336x4096   32 CTAs, 224 k-blocks   s1 / s1
-//   4096x28672  224 CTAs,  64 k-blocks   s4 / s1
-//   5120x25600  200 CTAs,  80 k-blocks   s4 / s1
+//   4096x28672  224 CTAs,  64 k-blocks   s1 / s1
+//   5120x25600  200 CTAs,  80 k-blocks   s1 / s1
 //   25600x5120   40 CTAs, 400 k-blocks   s1 / s1
 //   8192x8192    64 CTAs, 128 k-blocks   s1 / s1
 //   8192x57344  448 CTAs, 128 k-blocks   s2 / s2
@@ -490,12 +490,13 @@ static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   // Very wide N: the weight is HBM-resident and a 2-way split hides the extra
   // latency (8192x57344 m=128: 2598 -> 2418 us). It costs 0.3% at m=16.
   if (blocks_x >= 8 * kOneWave) return 2;
-  if (blocks_x > kOneWave + kOneWave / 4) {
-    // Wide but short K still benefits from more CTAs at small M
-    // (5120x25600 m=16: 371 -> 360 us); a long K does not.
-    if (m <= 64 && k_blocks < kOneWave * 4 && blocks_x >= 4 * kOneWave) return 4;
-    return 1;
-  }
+  // Wide N already fills the machine several times over, so a split only adds
+  // the reduce pass. Measured on gfx1201 against the same launch with one K
+  // pass: 4096x28672 (224 CTAs) lost 6.5% / 11.1% / 23.7% at m=16/32/64 when
+  // split four ways, and 5120x25600 (200 CTAs) lost 1.5% / 10.8% at m=32/64 for
+  // a 4.1% gain at m=16. The previous rule required blocks_x >= 128, so it only
+  // ever fired on shapes that were already 6-7 waves deep.
+  if (blocks_x > kOneWave + kOneWave / 4) return 1;
   // One wave or less. Split only when there is enough K to give every split a
   // real slice: 4096x4096 (64 k-blocks) goes 27.3 -> 25.7 us at m=16, while
   // 896x4864 (14 k-blocks) is faster unsplit because the per-CTA prologue

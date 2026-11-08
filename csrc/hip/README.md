@@ -104,7 +104,7 @@ per stream; do not reintroduce it.
 
 This mirrors the CUDA build exactly (`csrc/api.cu`, `run_linear`): the library
 owns no scratch, allocates nothing, and keeps no per-device or per-stream cache.
-Thirteen of the forty benchmark `shape × m` cells split K; a null or undersized
+Seven of the forty benchmark `shape × m` cells split K; a null or undersized
 buffer is rejected and `nf12_linear` returns `NF12_ERROR_INSUFFICIENT_WORKSPACE`,
 the same status the CUDA build returns, so a caller ported from CUDA behaves
 identically.
@@ -262,16 +262,16 @@ model does.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096×4096 | 1.19 / 1.26 | 0.92 / 1.18 | 1.05 / 1.13 | 0.77 / 1.04 | 0.67 / 0.97 | 0.87 / 0.94 |
-| 4096×14336 | 1.34 / 1.33 | 1.29 / 1.29 | 1.25 / 1.23 | 1.19 / 1.18 | 1.16 / 1.16 | 0.82 / 0.75 |
-| 14336×4096 | 1.34 / 1.32 | 1.31 / 1.30 | 1.33 / 1.33 | 1.25 / 1.24 | 1.21 / 1.22 | 1.08 / 1.05 |
-| 4096×28672 | 1.34 / 1.34 | 1.31 / 1.31 | 1.14 / 1.14 | 1.06 / 1.07 | 0.96 / 0.96 | 0.74 / 0.67 |
-| 5120×25600 | 1.38 / 1.38 | 1.36 / 1.36 | 1.21 / 1.21 | 1.14 / 1.14 | 1.04 / 1.04 | 0.77 / 0.75 |
-| 25600×5120 | 1.33 / 1.33 | 1.31 / 1.30 | 1.35 / 1.35 | 1.35 / 1.35 | 1.22 / 1.20 | 1.16 / 1.11 |
-| 8192×8192 | 1.63 / 1.75 | 1.27 / 1.27 | 1.29 / 1.29 | 1.28 / 1.28 | 1.24 / 1.24 | 0.79 / 0.71 |
-| 8192×57344 | 1.40 / 1.40 | 1.32 / 1.32 | 1.22 / 1.21 | 1.21 / 1.22 | 1.15 / 1.14 | 0.76 / 0.74 |
-| 2048×8192 | 1.38 / 1.36 | 0.93 / 1.22 | 1.01 / 1.23 | 0.92 / 1.18 | 0.74 / 1.10 | 0.64 / 0.75 |
-| 896×4864 | 2.04 / 1.81 | 0.98 / 1.05 | 1.24 / 1.26 | 1.19 / 1.65 | 0.80 / 1.34 | 0.76 / 1.29 |
+| 4096×4096 | 1.19 / 1.27 | 0.93 / 1.18 | 1.04 / 1.13 | 0.79 / 1.03 | 0.64 / 0.94 | 0.80 / 0.89 |
+| 4096×14336 | 1.34 / 1.34 | 1.29 / 1.29 | 1.25 / 1.24 | 1.18 / 1.17 | 1.15 / 1.16 | 0.79 / 0.75 |
+| 14336×4096 | 1.34 / 1.33 | 1.30 / 1.30 | 1.33 / 1.33 | 1.25 / 1.24 | 1.20 / 1.21 | 1.08 / 1.06 |
+| 4096×28672 | 1.34 / 1.34 | 1.31 / 1.31 | 1.27 / 1.22 | 1.25 / 1.21 | 1.27 / 1.28 | 0.75 / 0.67 |
+| 5120×25600 | 1.38 / 1.38 | 1.36 / 1.36 | 1.20 / 1.19 | 1.18 / 1.18 | 1.19 / 1.20 | 0.78 / 0.73 |
+| 25600×5120 | 1.33 / 1.33 | 1.31 / 1.31 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.20 | 1.18 / 1.12 |
+| 8192×8192 | 1.66 / 1.74 | 1.27 / 1.27 | 1.29 / 1.29 | 1.28 / 1.28 | 1.24 / 1.24 | 0.80 / 0.71 |
+| 8192×57344 | 1.40 / 1.40 | 1.32 / 1.32 | 1.22 / 1.21 | 1.21 / 1.21 | 1.15 / 1.14 | 0.75 / 0.74 |
+| 2048×8192 | 1.56 / 1.36 | 0.93 / 1.22 | 1.01 / 1.23 | 0.91 / 1.19 | 0.74 / 1.12 | 0.69 / 0.74 |
+| 896×4864 | 1.69 / 1.62 | 0.98 / 1.06 | 1.29 / 1.26 | 1.20 / 1.65 | 0.79 / 1.34 | 0.76 / 1.30 |
 
 Accuracy on every row: **0 violations** of `|err| <= 2e-3 + 2e-3*|ref|`
 against the BF16 twin, with `rms_rel ≈ 5e-5` (the difference between two BF16
@@ -322,6 +322,27 @@ Warm ratio against dense BF16, before → after:
 
 `m=16` still routes to the matrix-core kernel, which is 1.2–2.3× faster than the
 fused one there on every measured shape.
+
+**Split-K only when the grid is starved.** `pick_splits` used to hand four K
+splits to any shape with at least 128 column blocks, which included launches
+that were already 6–7 waves deep. There the extra FP32 partial plane (7–28 MB
+written *and* read) costs more than the additional CTAs buy. Dropping that rule,
+measured in one process against the same binary otherwise unchanged:
+
+| k × n | m | split 4 | one K pass | delta |
+| --- | ---: | ---: | ---: | ---: |
+| 4096×28672 | 16 | 333.6 | 310.2 | **−7.0%** |
+| 4096×28672 | 32 | 362.4 | 321.7 | **−11.2%** |
+| 4096×28672 | 64 | 417.2 | 317.9 | **−23.8%** |
+| 5120×25600 | 16 | 363.3 | 375.8 | +3.4% |
+| 5120×25600 | 32 | 388.1 | 382.0 | −1.6% |
+| 5120×25600 | 64 | 433.9 | 385.2 | **−11.2%** |
+
+One cell loses 3.4% (and still runs at 1.20× BF16); the other five gain, up to
+23.8%. Those two shapes no longer need split-K scratch at all, so
+`nf12_hip_linear_wmma_workspace_bytes` returns 0 for them. `8192×57344` keeps
+its two-way split: it is 14 waves deep, and there the split still helps at
+m=128 (2601 → 2414 µs).
 
 ### Small weights: four fixes that took them from ~0.5× to parity
 
@@ -414,7 +435,7 @@ launch must be starved enough that one extra resident CTA matters, but not so
 starved that the buffer's own latency hiding is the bigger win. `4096×4096`
 m=16 is 128 CTAs — four waves against a cap of three — and the buffer costs
 28.4 → 23.5 µs. The wide shapes are 14–28 waves deep, where the cap never bites
-and removing the buffer only loses (`4096×28672` m=16: 1.14 → 1.08×).
+and removing the buffer only loses.
 `2048×8192` m=16 is two waves, the three still fit, and the buffer is worth
 30.5 → 25.9 µs.
 
