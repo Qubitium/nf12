@@ -49,15 +49,10 @@ cmake -B build/c -G Ninja -DNF12_BUILD_TORCH=OFF -DNF12_CUDA_ARCHS=120
 cmake --build build/c
 ```
 
-## RDNA4 (ROCm)
-
-`csrc/hip/` is a HIP port of the codec and the fused linear kernels for RDNA4.
-It reads and writes the identical tiled byte stream, so a checkpoint is portable
-between NVIDIA and AMD hosts in both directions.
 ## AMD RDNA4 (ROCm)
 
 The HIP backend provides support and a [C API](include/nf12/nf12_hip.h) for
-`gfx1200` and `gfx1201`. 
+`gfx1200` and `gfx1201`.
 
 The Python APIs, including `nf12.nn` and `torch.ops.nf12` are not available for HIP.
 
@@ -69,6 +64,16 @@ cmake -S . -B build/hip -G Ninja \
   -DNF12_HIP_ARCHS=gfx1201 \
   -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++
 cmake --build build/hip --target nf12_hip
+```
+
+Use `-DNF12_HIP_ARCHS=gfx1200` for a `gfx1200` GPU.
+
+Fused linear kernels support batches of 1–256 tokens. For larger batches,
+the caller must decode the weights and run a BF16 GEMM.
+
+See the [HIP documentation](csrc/hip/README.md) for R9700 benchmark results
+and kernel implementation details.
+
 ## Python
 
 ```python
