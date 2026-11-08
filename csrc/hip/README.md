@@ -131,25 +131,26 @@ model does.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096×4096 | 1.20 / 1.26 | 0.94 / 1.17 | 1.01 / 1.13 | 0.79 / 1.04 | 0.68 / 0.96 | 0.82 / 0.92 |
-| 4096×14336 | 1.34 / 1.34 | 1.29 / 1.29 | 1.23 / 1.23 | 1.17 / 1.16 | 1.15 / 1.15 | 0.86 / 0.77 |
-| 14336×4096 | 1.34 / 1.33 | 1.30 / 1.30 | 1.32 / 1.32 | 1.25 / 1.24 | 1.20 / 1.21 | 1.08 / 1.08 |
-| 4096×28672 | 1.34 / 1.34 | 1.31 / 1.31 | 1.14 / 1.14 | 1.07 / 1.06 | 0.96 / 0.96 | 0.75 / 0.67 |
-| 5120×25600 | 1.38 / 1.38 | 1.36 / 1.37 | 1.21 / 1.21 | 1.14 / 1.14 | 1.04 / 1.04 | 0.79 / 0.75 |
-| 25600×5120 | 1.33 / 1.33 | 1.30 / 1.31 | 1.35 / 1.35 | 1.35 / 1.34 | 1.21 / 1.20 | 1.18 / 1.11 |
-| 8192×8192 | 1.69 / 1.62 | 1.27 / 1.27 | 1.30 / 1.29 | 1.29 / 1.28 | 1.25 / 1.24 | 0.80 / 0.73 |
-| 8192×57344 | 1.40 / 1.41 | 1.32 / 1.32 | 1.22 / 1.22 | 1.21 / 1.21 | 1.15 / 1.14 | 0.77 / 0.74 |
-| 2048×8192 | 1.39 / 1.36 | 1.02 / 1.22 | 1.02 / 1.23 | 0.93 / 1.19 | 0.73 / 1.11 | 0.64 / 0.74 |
-| 896×4864 | 1.70 / 1.82 | 0.96 / 1.06 | 1.26 / 1.25 | 1.20 / 1.65 | 0.80 / 1.39 | 0.77 / 1.33 |
+| 4096×4096 | 1.19 / 1.26 | 0.92 / 1.18 | 1.05 / 1.13 | 0.77 / 1.04 | 0.67 / 0.97 | 0.87 / 0.94 |
+| 4096×14336 | 1.34 / 1.33 | 1.29 / 1.29 | 1.25 / 1.23 | 1.19 / 1.18 | 1.16 / 1.16 | 0.82 / 0.75 |
+| 14336×4096 | 1.34 / 1.32 | 1.31 / 1.30 | 1.33 / 1.33 | 1.25 / 1.24 | 1.21 / 1.22 | 1.08 / 1.05 |
+| 4096×28672 | 1.34 / 1.34 | 1.31 / 1.31 | 1.14 / 1.14 | 1.06 / 1.07 | 0.96 / 0.96 | 0.74 / 0.67 |
+| 5120×25600 | 1.38 / 1.38 | 1.36 / 1.36 | 1.21 / 1.21 | 1.14 / 1.14 | 1.04 / 1.04 | 0.77 / 0.75 |
+| 25600×5120 | 1.33 / 1.33 | 1.31 / 1.30 | 1.35 / 1.35 | 1.35 / 1.35 | 1.22 / 1.20 | 1.16 / 1.11 |
+| 8192×8192 | 1.63 / 1.75 | 1.27 / 1.27 | 1.29 / 1.29 | 1.28 / 1.28 | 1.24 / 1.24 | 0.79 / 0.71 |
+| 8192×57344 | 1.40 / 1.40 | 1.32 / 1.32 | 1.22 / 1.21 | 1.21 / 1.22 | 1.15 / 1.14 | 0.76 / 0.74 |
+| 2048×8192 | 1.38 / 1.36 | 0.93 / 1.22 | 1.01 / 1.23 | 0.92 / 1.18 | 0.74 / 1.10 | 0.64 / 0.75 |
+| 896×4864 | 2.04 / 1.81 | 0.98 / 1.05 | 1.24 / 1.26 | 1.19 / 1.65 | 0.80 / 1.34 | 0.76 / 1.29 |
 
-Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
-output-rounding floor. The fused linear has **0 violations** of
-`|err| <= 2e-3 + 2e-3*|ref|` on the project's scaled accuracy harness.
+Accuracy on every row: **0 violations** of `|err| <= 2e-3 + 2e-3*|ref|`
+against the BF16 twin, with `rms_rel ≈ 5e-5` (the difference between two BF16
+output roundings). Against the FP64 oracle the same runs report
+`rms_rel ≈ 1.66e-3`, the oracle's own BF16 floor.
 
 The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
 `m=8` upward on weights large enough that the packed read dominates. Across the
-seven 14336/25600/57344-wide shapes it is 1.13–1.35× at `m=8..32` and
-0.96–1.24× at `m=64`. At `m=1` every shape is now above parity (1.20–1.71×).
+seven 14336/25600/57344-wide shapes it is 1.06–1.36× at `m=8..32` and
+0.96–1.24× at `m=64`. At `m=1` every shape is now above parity (1.19–2.04×).
 
 ### Small batches: the fused path is specialized on the token count
 
@@ -181,12 +182,12 @@ Warm ratio against dense BF16, before → after:
 
 | k × n | m=1 | m=8 |
 | --- | ---: | ---: |
-| 4096×4096 | 0.84 → **1.20** | 0.67 → **0.94** |
-| 2048×8192 | 1.33 → **1.38** | 0.80 → **0.97** |
-| 896×4864 | 1.63 → **1.69** | 0.83 → **0.97** |
-| 4096×28672 | 1.33 → **1.34** | 1.22 → **1.30** |
+| 4096×4096 | 0.84 → **1.19** | 0.67 → **0.92** |
+| 2048×8192 | 1.33 → **1.38** | 0.80 → **0.93** |
+| 896×4864 | 1.63 → **2.04** | 0.83 → **0.98** |
+| 4096×28672 | 1.33 → **1.34** | 1.22 → **1.31** |
 | 25600×5120 | 1.33 → **1.33** | 1.15 → **1.31** |
-| 8192×8192 | 1.64 → **1.71** | 1.09 → **1.27** |
+| 8192×8192 | 1.64 → **1.63** | 1.09 → **1.27** |
 
 `m=16` still routes to the matrix-core kernel, which is 1.2–2.3× faster than the
 fused one there on every measured shape.
@@ -231,23 +232,23 @@ rather than paying four prologues for three super-atoms each.
 
 | k × n | m=16 before | m=16 after | m=64 before | m=64 after |
 | --- | ---: | ---: | ---: | ---: |
-| 4096×4096 | 0.48× | **1.02×** (cold 1.12×) | 0.45× | **0.68×** |
-| 2048×8192 | 0.66× | **0.99×** (cold 1.23×) | 0.59× | **0.72×** |
-| 896×4864 | 0.62× | **1.25×** (cold 1.25×) | 0.50× | **0.82×** |
-| 25600×5120 | 1.15× | **1.35×** | 0.98× | **1.21×** |
+| 4096×4096 | 0.48× | **1.05×** (cold 1.13×) | 0.45× | **0.67×** |
+| 2048×8192 | 0.66× | **1.01×** (cold 1.23×) | 0.59× | **0.74×** |
+| 896×4864 | 0.62× | **1.24×** (cold 1.26×) | 0.50× | **0.80×** |
+| 25600×5120 | 1.15× | **1.35×** | 0.98× | **1.22×** |
 
-`4096×4096` at `m=16` is 1.02× warm and 1.12× cold: the 24 MiB packed weight
+`4096×4096` at `m=16` is 1.05× warm and 1.13× cold: the 24 MiB packed weight
 fits in the 64 MiB Infinity Cache, so warm BF16 runs at ~1.4 TB/s while cold
 BF16 falls back to the ~633 GB/s HBM ceiling. Its 4096 output columns give only
 32 CTAs, so the kernel is latency-bound rather than bandwidth-bound, which is
 why the occupancy tuning above is worth 1.20× there.
 
 Cold — the regime a real multi-layer model sees — all three small shapes are at
-or above parity at `m=16` (1.12× / 1.23× / 1.25×). Above that the gap is
-0.64–1.20× warm and 0.74–1.65× cold: from `kMt = 4` the accumulator costs 64
-VGPRs and three CTAs per CU is the ceiling. Still below parity cold:
-`4096×4096` at `m=64` (0.96×) and `m=128` (0.92×), `2048×8192` at `m=128`
-(0.74×).
+or above parity at `m=16` (1.13× / 1.23× / 1.26×). Above that the gap is
+0.64–1.35× warm and 0.67–1.65× cold: from `kMt = 4` the accumulator costs 64
+VGPRs and three CTAs per CU is the ceiling. Still below parity cold: the wide
+shapes at `m=128` (0.67–0.76×), `2048×8192` at `m=128` (0.75×), and
+`4096×4096` at `m=64`/`m=128` (0.97× / 0.94×).
 
 ### `m=128`: the accumulator is the whole occupancy story
 
@@ -256,13 +257,13 @@ the kernel lands at 167 — about **one CTA per CU**. Halving the tile count and
 splitting M across CTAs doubles the packed read but restores the occupancy, and
 that trade only pays where the second read is cheap. Two cases qualify: long K,
 where the matrix-core work amortises it (14336×4096 **1.08×**, 25600×5120
-**1.18×**, 8192×8192 **0.80×**), and a narrow N, where the doubled grid is still
-only ~2.5 waves (`4096×4096` 0.69 → **0.82×**, `896×4864` 0.51 → **0.77×** warm
-and **1.33×** cold).
+**1.16×**, 8192×8192 **0.79×**), and a narrow N, where the doubled grid is still
+only ~2.5 waves (`4096×4096` 0.69 → **0.87×**, `896×4864` 0.51 → **0.76×** warm
+and **1.29×** cold).
 
 `2048×8192` is the case that fails: 64 column blocks means splitting M makes 128
 CTAs *and* reads the weight twice, measured 58.6 → 85.2 µs. It stays on 8 tiles
-and sits at 0.64×. The wide-N shapes (0.75–0.86×) are still on 8 tiles for the
+and sits at 0.64×. The wide-N shapes (0.74–0.82×) are still on 8 tiles for the
 same reason — their grid is already 112–896 CTAs, so there is nothing to buy by
 doubling the read.
 
