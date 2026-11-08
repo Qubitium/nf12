@@ -110,8 +110,13 @@ Double buffering is dropped where its 18 KiB of extra shared memory is what caps
 resident CTAs, worth 1.20x on `4096x4096` at `m=16` (28.4 -> 23.5 us); and
 split-K goes four ways up to `m=32` but not beyond, because from four token
 tiles the accumulator already caps a CU at three CTAs and the extra splits only
-queue. `m=128` on the large shapes stays 0.75-1.20x because rocBLAS is already
-near the HBM roofline.
+queue.
+
+At `m=128` the eight accumulators alone are 64 VGPRs, so the 8-tile kernel fits
+about one CTA per CU. Halving the tile count and splitting M across CTAs doubles
+the packed read but restores occupancy, and that is taken only where the second
+read is cheap: long K, or a narrow N whose doubled grid is still ~2.5 waves. It
+moved `4096x4096` 0.69 -> 0.82x and `896x4864` 0.51 -> 0.77x warm (1.33x cold).
 
 Full tables and porting notes are in
 [`csrc/hip/README.md`](csrc/hip/README.md).

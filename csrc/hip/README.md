@@ -116,16 +116,16 @@ model does.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096×4096 | 1.18 / 1.26 | 0.95 / 1.17 | 1.02 / 1.12 | 0.81 / 1.04 | 0.68 / 0.95 | 0.71 / 0.69 |
-| 4096×14336 | 1.34 / 1.34 | 1.29 / 1.29 | 1.24 / 1.23 | 1.17 / 1.15 | 1.16 / 1.15 | 0.79 / 0.75 |
-| 14336×4096 | 1.34 / 1.33 | 1.31 / 1.30 | 1.32 / 1.32 | 1.25 / 1.24 | 1.20 / 1.22 | 1.12 / 1.06 |
-| 4096×28672 | 1.34 / 1.34 | 1.31 / 1.31 | 1.14 / 1.14 | 1.07 / 1.07 | 0.96 / 0.96 | 0.75 / 0.69 |
-| 5120×25600 | 1.38 / 1.38 | 1.36 / 1.36 | 1.21 / 1.21 | 1.14 / 1.14 | 1.04 / 1.04 | 0.79 / 0.74 |
-| 25600×5120 | 1.33 / 1.33 | 1.31 / 1.30 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.21 | 1.18 / 1.11 |
-| 8192×8192 | 1.61 / 1.65 | 1.27 / 1.27 | 1.29 / 1.28 | 1.29 / 1.28 | 1.25 / 1.23 | 0.79 / 0.73 |
+| 4096×4096 | 1.20 / 1.26 | 0.94 / 1.17 | 1.01 / 1.13 | 0.79 / 1.04 | 0.68 / 0.96 | 0.82 / 0.92 |
+| 4096×14336 | 1.34 / 1.34 | 1.29 / 1.29 | 1.23 / 1.23 | 1.17 / 1.16 | 1.15 / 1.15 | 0.86 / 0.77 |
+| 14336×4096 | 1.34 / 1.33 | 1.30 / 1.30 | 1.32 / 1.32 | 1.25 / 1.24 | 1.20 / 1.21 | 1.08 / 1.08 |
+| 4096×28672 | 1.34 / 1.34 | 1.31 / 1.31 | 1.14 / 1.14 | 1.07 / 1.06 | 0.96 / 0.96 | 0.75 / 0.67 |
+| 5120×25600 | 1.38 / 1.38 | 1.36 / 1.37 | 1.21 / 1.21 | 1.14 / 1.14 | 1.04 / 1.04 | 0.79 / 0.75 |
+| 25600×5120 | 1.33 / 1.33 | 1.30 / 1.31 | 1.35 / 1.35 | 1.35 / 1.34 | 1.21 / 1.20 | 1.18 / 1.11 |
+| 8192×8192 | 1.69 / 1.62 | 1.27 / 1.27 | 1.30 / 1.29 | 1.29 / 1.28 | 1.25 / 1.24 | 0.80 / 0.73 |
 | 8192×57344 | 1.40 / 1.41 | 1.32 / 1.32 | 1.22 / 1.22 | 1.21 / 1.21 | 1.15 / 1.14 | 0.77 / 0.74 |
-| 2048×8192 | 1.36 / 1.36 | 0.99 / 1.22 | 0.99 / 1.23 | 0.89 / 1.19 | 0.72 / 1.11 | 0.67 / 0.74 |
-| 896×4864 | 1.69 / 1.81 | 0.98 / 1.06 | 1.25 / 1.25 | 1.20 / 1.64 | 0.82 / 1.36 | 0.53 / 0.74 |
+| 2048×8192 | 1.39 / 1.36 | 1.02 / 1.22 | 1.02 / 1.23 | 0.93 / 1.19 | 0.73 / 1.11 | 0.64 / 0.74 |
+| 896×4864 | 1.70 / 1.82 | 0.96 / 1.06 | 1.26 / 1.25 | 1.20 / 1.65 | 0.80 / 1.39 | 0.77 / 1.33 |
 
 Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
 output-rounding floor. The fused linear has **0 violations** of
@@ -229,11 +229,27 @@ why the occupancy tuning above is worth 1.20× there.
 
 Cold — the regime a real multi-layer model sees — all three small shapes are at
 or above parity at `m=16` (1.12× / 1.23× / 1.25×). Above that the gap is
-0.53–1.20× warm and 0.69–1.64× cold: from `kMt = 4` the accumulator costs 64
-VGPRs, three CTAs per CU is the ceiling, and the extra packed reads are only
-paid back once the weight leaves the cache. Still below parity cold:
-`4096×4096` at `m=64` (0.95×) and `m=128` (0.69×), `2048×8192` at `m=128`
-(0.74×), `896×4864` at `m=128` (0.74×).
+0.64–1.20× warm and 0.74–1.65× cold: from `kMt = 4` the accumulator costs 64
+VGPRs and three CTAs per CU is the ceiling. Still below parity cold:
+`4096×4096` at `m=64` (0.96×) and `m=128` (0.92×), `2048×8192` at `m=128`
+(0.74×).
+
+### `m=128`: the accumulator is the whole occupancy story
+
+At `kMt=8` the eight 16-token accumulators are 64 FP32 VGPRs on their own, and
+the kernel lands at 167 — about **one CTA per CU**. Halving the tile count and
+splitting M across CTAs doubles the packed read but restores the occupancy, and
+that trade only pays where the second read is cheap. Two cases qualify: long K,
+where the matrix-core work amortises it (14336×4096 **1.08×**, 25600×5120
+**1.18×**, 8192×8192 **0.80×**), and a narrow N, where the doubled grid is still
+only ~2.5 waves (`4096×4096` 0.69 → **0.82×**, `896×4864` 0.51 → **0.77×** warm
+and **1.33×** cold).
+
+`2048×8192` is the case that fails: 64 column blocks means splitting M makes 128
+CTAs *and* reads the weight twice, measured 58.6 → 85.2 µs. It stays on 8 tiles
+and sits at 0.64×. The wide-N shapes (0.75–0.86×) are still on 8 tiles for the
+same reason — their grid is already 112–896 CTAs, so there is nothing to buy by
+doubling the read.
 
 ### Occupancy: the buffer and the split are both count tests
 
