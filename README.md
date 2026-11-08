@@ -54,73 +54,21 @@ cmake --build build/c
 `csrc/hip/` is a HIP port of the codec and the fused linear kernels for RDNA4.
 It reads and writes the identical tiled byte stream, so a checkpoint is portable
 between NVIDIA and AMD hosts in both directions.
+## AMD RDNA4 (ROCm)
 
-Decode, encode and the matrix-core fused path are implemented and validated on a
-Radeon AI PRO R9700 (`gfx1201`). The C API is
-[`include/nf12/nf12_hip.h`](include/nf12/nf12_hip.h). The torch extension and the
-`nf12.nn` / `torch.ops.nf12` Python API are still CUDA-only: on ROCm
-`nf12.library_path()` resolves to `libnf12_hip.so`, but `nf12._library.load()`
-raises a clear error instead of failing obscurely.
+The HIP backend provides support and a [C API](include/nf12/nf12_hip.h) for
+`gfx1200` and `gfx1201`. 
+
+The Python APIs, including `nf12.nn` and `torch.ops.nf12` are not available for HIP.
+
+Build from source with the ROCm toolkit, a C++ compiler, CMake 3.26+ and Ninja.
 
 ```bash
-cmake -S . -B build/hip -G Ninja -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=OFF \
-      -DNF12_HIP_ARCHS=gfx1201 -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++
+cmake -S . -B build/hip -G Ninja \
+  -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=OFF \
+  -DNF12_HIP_ARCHS=gfx1201 \
+  -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++
 cmake --build build/hip --target nf12_hip
-```
-
-On a ROCm build `nf12._jit` runs exactly that configuration automatically and
-caches the result per source hash. `NF12_ENABLE_HIP` is additive and changes no
-CUDA target, and a host without a CUDA compiler now skips the CUDA targets
-instead of failing configuration.
-
-Route selection by token count matches the CUDA side: `m <= 15` uses the fused
-small-M kernel, `16 <= m <= 256` the matrix-core path, and larger `m` falls back
-to decode-then-rocBLAS. `m=16` is a single matrix-core tile and is faster than
-the fused kernel on every measured shape. `gfx1250` has no `wmma-128b-insts`,
-so the matrix-core path compiles out there and the caller keeps the non-wmma
-route.
-
-Correctness and performance on the R9700: decode is bit-exact, encode is
-byte-identical to the reference codec, and fused linear has 0 violations of
-`|err| <= 2e-3 + 2e-3*|ref|` over 21 shapes for
-`m ∈ {1,16,17,32,33,48,64,96,128,256}` (`rms_rel ~1.66e-3`, the FP64 oracle's
-own BF16 rounding floor). Against a dense BF16 GEMM, on the same `k x n` grid
-as the CUDA benchmarks (`bench/common.py`), the HIP kernel is 1.13-1.35x faster
-at `m=8..32` for the large 14336/25600/57344-wide weights, and 0.96-1.24x at
-`m=64`.
-
-Small batches got their own pass. The `m <= 15` fused kernel now takes the token
-count as a template parameter, so its accumulator and warp-partial plane are
-compile-time sized instead of dynamically indexed and always 16 tokens wide; at
-`m=1` the partial plane is deliberately over-allocated to throttle occupancy,
-because eight CTAs per CU thrashes the 64 MiB LLC. That took `4096x4096` from
-0.84x to 1.18x at `m=1` and from 0.67x to 0.95x at `m=8`, `2048x8192` from
-0.80x to 0.99x and `896x4864` from 0.83x to 0.98x at `m=8`. Every shape is now
-above parity at `m=1` (1.18-1.69x).
-
-The small-weight work at `m=16` — storing straight out of the decoder's layout
-(no `ds_bpermute` transpose, conflict-free `STS.32`), a padded shared stride,
-hoisting the loads over the mma, and capping the split-K reduce grid at 128
-blocks — took `896x4864` from 0.62x to 1.25x, `2048x8192` from 0.66x to 0.99x
-and `4096x4096` from 0.48x to 1.02x. All three are at or above parity on the
-cold (cache-cycling) path at `m=16` (1.25x / 1.23x / 1.12x).
-
-Two further knobs are now derived from the launch shape rather than hand-set.
-Double buffering is dropped where its 18 KiB of extra shared memory is what caps
-resident CTAs, worth 1.20x on `4096x4096` at `m=16` (28.4 -> 23.5 us); and
-split-K goes four ways up to `m=32` but not beyond, because from four token
-tiles the accumulator already caps a CU at three CTAs and the extra splits only
-queue.
-
-At `m=128` the eight accumulators alone are 64 VGPRs, so the 8-tile kernel fits
-about one CTA per CU. Halving the tile count and splitting M across CTAs doubles
-the packed read but restores occupancy, and that is taken only where the second
-read is cheap: long K, or a narrow N whose doubled grid is still ~2.5 waves. It
-moved `4096x4096` 0.69 -> 0.82x and `896x4864` 0.51 -> 0.77x warm (1.33x cold).
-
-Full tables and porting notes are in
-[`csrc/hip/README.md`](csrc/hip/README.md).
-
 ## Python
 
 ```python
