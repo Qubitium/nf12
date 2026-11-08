@@ -280,6 +280,10 @@ bool valid_weight(const FusedDecodeWeight& w) {
   if (!w.packed || !aligned(w.packed, 16)) return false;
   if (w.experts < 1 || w.experts > INT_MAX) return false;
   if (w.n < 16 || w.n % 16 || w.k < 64 || w.k % 64) return false;
+  // The CUDA original caps n and k at 4096. A generous bound instead keeps the
+  // span arithmetic below inside int64 and rejects absurd sizes before any
+  // pointer math, without rejecting a legitimate large expert.
+  if (w.n > (int64_t{1} << 20) || w.k > (int64_t{1} << 20)) return false;
   if (!w.bf16t) {
     if (!w.exp_base || !w.escape_offsets) return false;
     if (w.escapes && !aligned(w.escapes, 16)) return false;
