@@ -51,6 +51,9 @@ def load() -> None:
         if _loaded:
             return
         if torch.version.hip is not None:
+            # The C ABI (include/nf12/nf12_hip.h) is the integration point for
+            # ROCm consumers such as vLLM/Sonar until torch.ops.nf12 is ported;
+            # the kernels and the byte format are already shared with CUDA.
             raise RuntimeError(
                 "nf12: the torch extension is not available on ROCm yet. The RDNA4 "
                 "kernels build as libnf12_hip.so and expose a C API "
