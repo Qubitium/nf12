@@ -142,7 +142,7 @@ Coverage, all exercised by `tests/hip/test_torch_ops.py` and
 | `embedding` (int32/int64) | native |
 | `moe_align`, `moe_combine`, `moe_silu_mul`, `moe_decode` | native |
 | `moe_linear`, `moe_linear_bf16t`, `_fused_moe` | native |
-| `_fused_moe` fast path | not ported; `ops.cpp` composes the ops above, which is the same result |
+| `_fused_moe` fast path | not ported; `ops.cpp` composes the ops above. Same numerics contract but not bit-identical, and ~3% slower at `T=1` (the only `T` it covers) |
 
 Two deliberate choices:
 
