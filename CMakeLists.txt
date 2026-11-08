@@ -32,7 +32,7 @@ set(CMAKE_CUDA_ARCHITECTURES "${_nf12_archs}")
 
 option(NF12_BUILD_NATIVE "Build native libraries during installation" ON)
 if(NF12_BUILD_NATIVE)
-  project(nf12 VERSION 1.0.0 LANGUAGES CXX CUDA)
+  project(nf12 VERSION 1.0.0 LANGUAGES CXX)
 else()
   project(nf12 VERSION 1.0.0 LANGUAGES NONE)
 endif()
@@ -46,9 +46,32 @@ if(NOT NF12_BUILD_NATIVE)
   return()
 endif()
 
+option(NF12_ENABLE_HIP "Build the RDNA4 HIP kernels (libnf12_hip.so)" OFF)
+
+# CUDA is optional so an ROCm-only host can build the HIP kernels without a CUDA
+# toolkit. NF12_CUDA_ARCHS is still parsed above, which sets
+# CMAKE_CUDA_ARCHITECTURES before the language is enabled below.
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+  enable_language(CUDA)
+  set(NF12_HAVE_CUDA ON)
+else()
+  set(NF12_HAVE_CUDA OFF)
+  message(STATUS "nf12: no CUDA compiler found; skipping the CUDA targets")
+endif()
+
+if(NOT NF12_HAVE_CUDA AND NOT NF12_ENABLE_HIP)
+  message(FATAL_ERROR
+    "nf12: neither a CUDA compiler nor NF12_ENABLE_HIP is available. Install the "
+    "CUDA toolkit, or configure with -DNF12_ENABLE_HIP=ON on an ROCm host.")
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
+
+if(NF12_HAVE_CUDA)
 
 find_package(CUDAToolkit REQUIRED)
 message(STATUS "nf12: CUDA ${CUDAToolkit_VERSION}, archs ${CMAKE_CUDA_ARCHITECTURES}")
@@ -132,10 +155,11 @@ if(NF12_BUILD_TORCH)
   install(TARGETS nf12_torch LIBRARY DESTINATION nf12)
 endif()
 
-# RDNA4 (gfx1200/gfx1201) HIP kernels. Off by default, and additive: enabling it
+endif()  # NF12_HAVE_CUDA
+
+# RDNA4 (gfx1200/gfx1201) HIP kernels. Off by default and additive: enabling it
 # does not change any CUDA target. The subtree also builds standalone without a
 # CUDA toolkit via `cmake -S csrc/hip -B build-hip`.
-option(NF12_ENABLE_HIP "Build the RDNA4 HIP kernels (libnf12_hip.so)" OFF)
 if(NF12_ENABLE_HIP)
   enable_language(HIP)
   add_subdirectory(csrc/hip)

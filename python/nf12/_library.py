@@ -18,8 +18,14 @@ _lock = threading.Lock()
 _loaded = False
 
 
-def library_path(name: str = "libnf12.so") -> Path:
+def _native_library_name() -> str:
+    """The C library for this backend."""
+    return "libnf12_hip.so" if torch.version.hip is not None else "libnf12.so"
+
+
+def library_path(name: str | None = None) -> Path:
     """Find a packaged native library, or build and cache it for visible GPUs."""
+    name = _native_library_name() if name is None else name
     # Editable installs put the native install tree before the Python source tree.
     for directory in nf12.__path__:
         candidate = Path(directory) / name
@@ -27,7 +33,7 @@ def library_path(name: str = "libnf12.so") -> Path:
             if name == "libnf12_torch.so" and not candidate.with_name("libnf12.so").is_file():
                 continue
             return candidate
-    if name in ("libnf12.so", "libnf12_torch.so"):
+    if name in ("libnf12.so", "libnf12_torch.so", "libnf12_hip.so"):
         from ._jit import library_directory
 
         return library_directory() / name
@@ -42,6 +48,13 @@ def load() -> None:
     with _lock:
         if _loaded:
             return
+        if torch.version.hip is not None:
+            raise RuntimeError(
+                "nf12: the torch extension is not available on ROCm yet. The RDNA4 "
+                "kernels build as libnf12_hip.so and expose a C API "
+                "(include/nf12/nf12_hip.h); nf12.nn and torch.ops.nf12 are CUDA-only "
+                "for now."
+            )
         torch.ops.load_library(str(library_path("libnf12_torch.so")))
         _register_fakes()
         _loaded = True

@@ -4,15 +4,17 @@ NF12 is a lossless, fixed-length 12-bit encoding of BF16 weight matrices,
 based on "NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight
 Compression" (Liberman, Fang, Zhang, Dao, Fu, Together AI, 2026). This library
 implements this data type efficiently on NVIDIA GPUs, from the Ampere generation
-up until Blackwell.
+up until Blackwell, and on AMD RDNA4 (`gfx1200` / `gfx1201`) via HIP.
 
 This library's bit and memory layout (tiled) are not compatible with the one
 described in the paper. You can read [the spec](docs/SPEC.md) for more info on the format.
 
 ## Requirements
 
-- NVIDIA GPU with SM80 or newer (Ampere and later).
-- CUDA toolkit 13.0+, a C++ compiler, CMake 3.26+, and Ninja for builds.
+- NVIDIA GPU with SM80 or newer (Ampere and later), **or** an AMD RDNA4 GPU
+  (`gfx1200` / `gfx1201`) for the HIP kernels.
+- CUDA toolkit 13.0+, a C++ compiler, CMake 3.26+, and Ninja for builds. The
+  ROCm path needs only `amdclang++` from the ROCm toolkit — no CUDA.
 - uv for Python environment management and builds.
 - Python 3.10+ and CUDA-enabled PyTorch 2.10+ for the Python package.
 - Weight shapes: `N` (out_features) a multiple of 16, `K` (in_features) a
@@ -46,6 +48,44 @@ You can build the C library alone with CMake:
 cmake -B build/c -G Ninja -DNF12_BUILD_TORCH=OFF -DNF12_CUDA_ARCHS=120
 cmake --build build/c
 ```
+
+## RDNA4 (ROCm)
+
+`csrc/hip/` is a HIP port of the codec and the fused linear kernels for RDNA4.
+It reads and writes the identical tiled byte stream, so a checkpoint is portable
+between NVIDIA and AMD hosts in both directions.
+
+Decode, encode and the matrix-core fused path are implemented and validated on a
+Radeon AI PRO R9700 (`gfx1201`). The C API is
+[`include/nf12/nf12_hip.h`](include/nf12/nf12_hip.h). The torch extension and the
+`nf12.nn` / `torch.ops.nf12` Python API are still CUDA-only: on ROCm
+`nf12.library_path()` resolves to `libnf12_hip.so`, but `nf12._library.load()`
+raises a clear error instead of failing obscurely.
+
+```bash
+cmake -S . -B build/hip -G Ninja -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=OFF \
+      -DNF12_HIP_ARCHS=gfx1201 -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++
+cmake --build build/hip --target nf12_hip
+```
+
+On a ROCm build `nf12._jit` runs exactly that configuration automatically and
+caches the result per source hash. `NF12_ENABLE_HIP` is additive and changes no
+CUDA target, and a host without a CUDA compiler now skips the CUDA targets
+instead of failing configuration.
+
+Route selection by token count matches the CUDA side: `m <= 16` uses the fused
+small-M kernel, `17 <= m <= 128` the matrix-core path, and larger `m` should fall
+back to decode-then-rocBLAS. `gfx1250` has no `wmma-128b-insts`, so the
+matrix-core path compiles out there and the caller keeps the non-wmma route.
+
+Correctness and performance on the R9700: decode is bit-exact, encode is
+byte-identical to the reference codec, and fused linear has 0 violations of
+`|err| <= 2e-3 + 2e-3*|ref|` over 21 shapes (`rms_rel ~1.66e-3`, the FP64
+oracle's own BF16 rounding floor). Against a dense BF16 GEMM the HIP kernel is
+1.30-1.44x faster at `11008x4096` for `m = 17..96`, running at ~640 GB/s against
+a measured 633 GB/s HBM read ceiling, and slower at `4096^2`, where the BF16
+weight fits the 64 MiB Infinity Cache. Full tables and porting notes are in
+[`csrc/hip/README.md`](csrc/hip/README.md).
 
 ## Python
 

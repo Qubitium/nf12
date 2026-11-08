@@ -26,38 +26,65 @@ cmake -S csrc/hip -B build-hip -DNF12_HIP_ARCHS="gfx1201"
 cmake --build build-hip -j
 ```
 
-produces `libnf12_hip.so`. Or enable it from the top-level CUDA build with
+produces `libnf12_hip.so`. Or enable it from the top-level build with
 `-DNF12_ENABLE_HIP=ON`, which is additive and does not alter any CUDA target.
+On a host with no CUDA compiler the top-level build now skips the CUDA targets
+instead of failing, so this is the normal path on ROCm:
 
-Note for CMake >= 4.2: `CMAKE_HIP_COMPILER` must point at `amdclang++`
-directly; the `hipcc` wrapper is rejected.
+```sh
+cmake -S . -B build -G Ninja -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=OFF \
+      -DNF12_HIP_ARCHS=gfx1201 -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++
+cmake --build build --target nf12_hip -j
+```
+
+`nf12._jit` uses exactly that configuration: on a ROCm build it detects the
+visible `gfx` targets, builds `libnf12_hip.so` into the per-user cache, and
+`nf12.library_path()` resolves to it. Note for CMake >= 4.2:
+`CMAKE_HIP_COMPILER` must point at `amdclang++` directly; the `hipcc` wrapper
+is rejected.
 
 ## Interface
 
-Plain C ABI, `hipStream_t` passed explicitly, `__hip_bfloat16` never crosses the
+Plain C ABI, declared in [`include/nf12/nf12_hip.h`](../../include/nf12/nf12_hip.h).
+`hipStream_t` is passed explicitly and `__hip_bfloat16` never crosses the
 boundary (buffers are `void*`):
 
 ```c
 size_t     nf12_hip_encode_workspace_bytes(int64_t n, int64_t k);
-hipError_t nf12_hip_encode_analyze(const void* w, int64_t n, int64_t k, int64_t ldw,
-                                   void* workspace, uint8_t* exp_base, int64_t* n_escapes);
-hipError_t nf12_hip_encode(const void* w, int64_t n, int64_t k, int64_t ldw,
-                           uint8_t exp_base, void* workspace, uint8_t* packed,
-                           uint4* escapes, int64_t* n_escapes, hipStream_t stream);
 
-hipError_t nf12_hip_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                           void* out, int64_t n, int64_t k, hipStream_t stream);
+hipError_t nf12_hip_encode_analyze(const void* w_bf16, int64_t n, int64_t k,
+                                   int64_t ldw, void* workspace,
+                                   size_t workspace_bytes, uint8_t* exp_base_out,
+                                   uint32_t* num_escapes_out, hipStream_t stream);
 
-hipError_t nf12_hip_linear_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                                 const void* x, void* out, int64_t n, int64_t k, int64_t m,
+hipError_t nf12_hip_encode(const void* w_bf16, int64_t n, int64_t k, int64_t ldw,
+                           uint8_t exp_base, uint8_t* packed_out,
+                           uint4* escapes_out, uint32_t escapes_capacity,
+                           void* workspace, size_t workspace_bytes,
+                           hipStream_t stream);
+
+hipError_t nf12_hip_decode(const uint8_t* packed, const uint4* escapes,
+                           uint32_t exp_base, int64_t n, int64_t k,
+                           void* out_bf16, int64_t ldo, hipStream_t stream);
+
+int        nf12_hip_linear_fused_small_m_supported(int64_t m);
+hipError_t nf12_hip_linear_fused(const uint8_t* packed, const uint4* escapes,
+                                 uint32_t exp_base, const void* x, void* out,
+                                 int64_t n, int64_t k, int64_t m,
                                  const void* bias, hipStream_t stream);
 
 int        nf12_hip_wmma_max_m(void);
 int        nf12_hip_wmma_supported(int64_t m);
-hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                                const void* x, void* out, int64_t n, int64_t k, int64_t m,
+hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes,
+                                uint32_t exp_base, const void* x, void* out,
+                                int64_t n, int64_t k, int64_t m,
                                 const void* bias, hipStream_t stream);
+
+hipError_t nf12_hip_selftest(uint32_t* out, hipStream_t stream);
 ```
+
+`analyze` and `encode` synchronize the supplied stream and cannot be graph
+captured, matching the CUDA contract.
 
 Route selection by token count: `m <= 16` uses the fused small-M kernel,
 `17 <= m <= 128` the matrix-core path, and larger `m` should fall back to
@@ -129,8 +156,10 @@ All verified on `gfx1201` hardware:
 
 ## Follow-ups
 
-* Wire `libnf12_hip` into `python/nf12` and the torch extension so the HIP path
-  is selectable at runtime, matching the CUDA dispatch.
+* Port the torch extension and the `nf12.nn` / `torch.ops.nf12` Python API. The
+  C library, the JIT build and `nf12.library_path()` are wired today;
+  `nf12._library.load()` raises a clear error on ROCm rather than failing
+  obscurely.
 * Unify the geometry constants with `include/nf12/format.cuh`. `format_hip.cuh`
   currently restates them and `static_assert`s that they match, so a format
   change breaks the build rather than silently diverging.
