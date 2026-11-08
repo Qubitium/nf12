@@ -116,16 +116,16 @@ model does.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096×4096 | 1.20 / 1.26 | 0.94 / 1.17 | 0.88 / 1.08 | 0.76 / 1.08 | 0.68 / 0.96 | 0.69 / 0.69 |
-| 4096×14336 | 1.33 / 1.33 | 1.29 / 1.29 | 1.23 / 1.23 | 1.17 / 1.16 | 1.16 / 1.15 | 0.82 / 0.74 |
-| 14336×4096 | 1.35 / 1.33 | 1.31 / 1.30 | 1.32 / 1.32 | 1.24 / 1.25 | 1.20 / 1.21 | 1.11 / 1.05 |
-| 4096×28672 | 1.34 / 1.34 | 1.30 / 1.31 | 1.14 / 1.14 | 1.07 / 1.06 | 0.96 / 0.96 | 0.75 / 0.69 |
-| 5120×25600 | 1.38 / 1.38 | 1.36 / 1.36 | 1.21 / 1.21 | 1.14 / 1.14 | 1.04 / 1.04 | 0.79 / 0.77 |
-| 25600×5120 | 1.33 / 1.33 | 1.31 / 1.30 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.20 | 1.18 / 1.10 |
-| 8192×8192 | 1.71 / 1.69 | 1.27 / 1.27 | 1.29 / 1.28 | 1.28 / 1.28 | 1.24 / 1.24 | 0.80 / 0.73 |
-| 8192×57344 | 1.40 / 1.41 | 1.32 / 1.32 | 1.22 / 1.22 | 1.21 / 1.20 | 1.16 / 1.14 | 0.77 / 0.74 |
-| 2048×8192 | 1.38 / 1.36 | 0.97 / 1.22 | 1.01 / 1.23 | 0.93 / 1.20 | 0.73 / 1.11 | 0.65 / 0.74 |
-| 896×4864 | 1.69 / 1.82 | 0.97 / 1.03 | 1.27 / 1.26 | 1.20 / 1.64 | 0.80 / 1.38 | 0.52 / 0.74 |
+| 4096×4096 | 1.18 / 1.26 | 0.95 / 1.17 | 1.02 / 1.12 | 0.81 / 1.04 | 0.68 / 0.95 | 0.71 / 0.69 |
+| 4096×14336 | 1.34 / 1.34 | 1.29 / 1.29 | 1.24 / 1.23 | 1.17 / 1.15 | 1.16 / 1.15 | 0.79 / 0.75 |
+| 14336×4096 | 1.34 / 1.33 | 1.31 / 1.30 | 1.32 / 1.32 | 1.25 / 1.24 | 1.20 / 1.22 | 1.12 / 1.06 |
+| 4096×28672 | 1.34 / 1.34 | 1.31 / 1.31 | 1.14 / 1.14 | 1.07 / 1.07 | 0.96 / 0.96 | 0.75 / 0.69 |
+| 5120×25600 | 1.38 / 1.38 | 1.36 / 1.36 | 1.21 / 1.21 | 1.14 / 1.14 | 1.04 / 1.04 | 0.79 / 0.74 |
+| 25600×5120 | 1.33 / 1.33 | 1.31 / 1.30 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.21 | 1.18 / 1.11 |
+| 8192×8192 | 1.61 / 1.65 | 1.27 / 1.27 | 1.29 / 1.28 | 1.29 / 1.28 | 1.25 / 1.23 | 0.79 / 0.73 |
+| 8192×57344 | 1.40 / 1.41 | 1.32 / 1.32 | 1.22 / 1.22 | 1.21 / 1.21 | 1.15 / 1.14 | 0.77 / 0.74 |
+| 2048×8192 | 1.36 / 1.36 | 0.99 / 1.22 | 0.99 / 1.23 | 0.89 / 1.19 | 0.72 / 1.11 | 0.67 / 0.74 |
+| 896×4864 | 1.69 / 1.81 | 0.98 / 1.06 | 1.25 / 1.25 | 1.20 / 1.64 | 0.82 / 1.36 | 0.53 / 0.74 |
 
 Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
 output-rounding floor. The fused linear has **0 violations** of
@@ -216,23 +216,50 @@ rather than paying four prologues for three super-atoms each.
 
 | k × n | m=16 before | m=16 after | m=64 before | m=64 after |
 | --- | ---: | ---: | ---: | ---: |
-| 4096×4096 | 0.48× | **0.89×** (cold 1.10×) | 0.45× | **0.65×** |
-| 2048×8192 | 0.66× | **1.03×** (cold 1.23×) | 0.59× | **0.74×** |
-| 896×4864 | 0.62× | **1.25×** (cold 1.25×) | 0.50× | **0.80×** |
+| 4096×4096 | 0.48× | **1.02×** (cold 1.12×) | 0.45× | **0.68×** |
+| 2048×8192 | 0.66× | **0.99×** (cold 1.23×) | 0.59× | **0.72×** |
+| 896×4864 | 0.62× | **1.25×** (cold 1.25×) | 0.50× | **0.82×** |
 | 25600×5120 | 1.15× | **1.35×** | 0.98× | **1.21×** |
 
-`4096×4096` at `m=16` is 0.89× warm but 1.10× cold: the 24 MiB packed weight
+`4096×4096` at `m=16` is 1.02× warm and 1.12× cold: the 24 MiB packed weight
 fits in the 64 MiB Infinity Cache, so warm BF16 runs at ~1.4 TB/s while cold
 BF16 falls back to the ~633 GB/s HBM ceiling. Its 4096 output columns give only
-32 CTAs — one per CU, two warps per SIMD — so the warm case is
-memory-latency-bound rather than bandwidth-bound.
+32 CTAs, so the kernel is latency-bound rather than bandwidth-bound, which is
+why the occupancy tuning above is worth 1.20× there.
 
 Cold — the regime a real multi-layer model sees — all three small shapes are at
-or above parity at `m=16` (1.10× / 1.23× / 1.25×). Above that the gap is
-0.51–1.21× warm and 0.69–1.63× cold: eight token tiles per CTA halve the CTA
-count, and the extra packed reads are only paid back once the weight leaves the
-cache. Still below parity cold: `4096×4096` at `m=64` (0.93×) and all three at
-`m=128` (0.69× / 0.74× / 0.74×).
+or above parity at `m=16` (1.12× / 1.23× / 1.25×). Above that the gap is
+0.53–1.20× warm and 0.69–1.64× cold: from `kMt = 4` the accumulator costs 64
+VGPRs, three CTAs per CU is the ceiling, and the extra packed reads are only
+paid back once the weight leaves the cache. Still below parity cold:
+`4096×4096` at `m=64` (0.95×) and `m=128` (0.69×), `2048×8192` at `m=128`
+(0.74×), `896×4864` at `m=128` (0.74×).
+
+### Occupancy: the buffer and the split are both count tests
+
+Two knobs were tuned by hand and are now derived from the launch shape.
+
+**Double buffering.** The decode-into-the-idle-buffer trick costs 18 KiB of
+shared memory per CTA (36 KiB against 18 KiB single-buffered), and a CU has
+128 KiB. At `kMt <= 2` the accumulator is small enough that the VGPR budget
+allows well over three CTAs, so that LDS footprint is what caps occupancy; from
+`kMt = 3` up the ~135 VGPRs already cap a CU at three CTAs and dropping the
+buffer buys nothing (25600×5120 m=128: 447 µs buffered against 479 µs not).
+
+Where LDS does bind, dropping the buffer only helps in a narrow band: the
+launch must be starved enough that one extra resident CTA matters, but not so
+starved that the buffer's own latency hiding is the bigger win. `4096×4096`
+m=16 is 128 CTAs — four waves against a cap of three — and the buffer costs
+28.4 → 23.5 µs. The wide shapes are 14–28 waves deep, where the cap never bites
+and removing the buffer only loses (`4096×28672` m=16: 1.14 → 1.08×).
+`2048×8192` m=16 is two waves, the three still fit, and the buffer is worth
+30.5 → 25.9 µs.
+
+**Split-K.** Splitting K multiplies the CTA count without duplicating any read,
+so it is free parallelism — but only while the extra CTAs can actually be
+resident. Four ways pays up to `m=32` (`4096×4096`: 30.1 → 27.1 µs) and loses
+from `kMt = 4` on (`4096×4096` m=64: 38.2 → 43.3 µs, m=128: 62.9 → 79.8 µs),
+because three CTAs per CU is already the ceiling.
 
 ## Porting notes (NVIDIA → AMD)
 

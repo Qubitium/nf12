@@ -94,19 +94,24 @@ count as a template parameter, so its accumulator and warp-partial plane are
 compile-time sized instead of dynamically indexed and always 16 tokens wide; at
 `m=1` the partial plane is deliberately over-allocated to throttle occupancy,
 because eight CTAs per CU thrashes the 64 MiB LLC. That took `4096x4096` from
-0.84x to 1.20x at `m=1` and from 0.67x to 0.94x at `m=8`, `2048x8192` from
-0.80x to 0.97x and `896x4864` from 0.83x to 0.97x at `m=8`. Every shape is now
-above parity at `m=1` (1.20-1.71x).
+0.84x to 1.18x at `m=1` and from 0.67x to 0.95x at `m=8`, `2048x8192` from
+0.80x to 0.99x and `896x4864` from 0.83x to 0.98x at `m=8`. Every shape is now
+above parity at `m=1` (1.18-1.69x).
 
 The small-weight work at `m=16` — storing straight out of the decoder's layout
 (no `ds_bpermute` transpose, conflict-free `STS.32`), a padded shared stride,
 hoisting the loads over the mma, and capping the split-K reduce grid at 128
-blocks — took `896x4864` from 0.62x to 1.27x, `2048x8192` from 0.66x to 1.01x
-and `4096x4096` from 0.48x to 0.88x. All three are at or above parity on the
-cold (cache-cycling) path at `m=16` (1.26x / 1.23x / 1.08x); warm, `4096x4096`
-still sits at 0.88x because 32 CTAs is one per CU, so the kernel is
-memory-latency-bound against the 64 MiB Infinity Cache. `m=128` on the large
-shapes stays 0.75-1.20x because rocBLAS is already near the HBM roofline.
+blocks — took `896x4864` from 0.62x to 1.25x, `2048x8192` from 0.66x to 0.99x
+and `4096x4096` from 0.48x to 1.02x. All three are at or above parity on the
+cold (cache-cycling) path at `m=16` (1.25x / 1.23x / 1.12x).
+
+Two further knobs are now derived from the launch shape rather than hand-set.
+Double buffering is dropped where its 18 KiB of extra shared memory is what caps
+resident CTAs, worth 1.20x on `4096x4096` at `m=16` (28.4 -> 23.5 us); and
+split-K goes four ways up to `m=32` but not beyond, because from four token
+tiles the accumulator already caps a CU at three CTAs and the extra splits only
+queue. `m=128` on the large shapes stays 0.75-1.20x because rocBLAS is already
+near the HBM roofline.
 
 Full tables and porting notes are in
 [`csrc/hip/README.md`](csrc/hip/README.md).
