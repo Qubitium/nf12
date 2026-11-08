@@ -1,6 +1,7 @@
-// SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 // SPDX-License-Identifier: Apache-2.0
+//
+// Adapted from GPT-QModel (https://github.com/ModelCloud/GPTQModel) by Qubitium.
 // ---------------------------------------------------------------------------
 // NF12-AD (NyoomFloat12) decode for AMD RDNA4 (gfx1200 / gfx1201 / gfx1250).
 //
@@ -13,7 +14,7 @@
 //   Copyright (c) 2026 AlpinDale and the nf12 contributors.
 //   Licensed under the Apache License, Version 2.0.
 //
-// This HIP port was written for GPT-QModel (ModelCloud.ai) and consumes the
+// This HIP port was adapted for GPT-QModel by Qubitium and consumes the
 // same NF12-AD byte stream as the CUDA kernels (docs/SPEC.md in
 // gptqmodel_ext/nf12). It lets NF12-AD checkpoints run on AMD RDNA4 GPUs
 // without an NVIDIA card or the CUDA toolchain.

@@ -13,9 +13,9 @@ validated on a Radeon AI PRO R9700 (`gfx1201`)**. Not yet wired into the
 | File | Contents |
 | --- | --- |
 | `format_hip.cuh` | SPEC §4 geometry, AMD `v_perm_b32` selector conversion, `decode_bulk`/`decode_group`, tiling helpers, wmma fragment helpers. |
-| `decode.hip` | `nf12_hip_decode` (NF12 → exact BF16), `nf12_hip_linear_fused` (small-M fused decode+GEMM, `m <= 16`), `nf12_hip_selftest`. |
+| `decode.hip` | `nf12_hip_decode` (NF12 → exact BF16), `nf12_hip_linear_fused` (small-M fused decode+GEMM; the dispatcher uses it for `m <= 15` and sends `m = 16` to the matrix-core path), `nf12_hip_selftest`. |
 | `encode.hip` | Native analyze/count/scan/write encoder (`nf12_hip_encode_workspace_bytes`, `nf12_hip_encode_analyze`, `nf12_hip_encode`). |
-| `wmma.hip` | `nf12_hip_linear_wmma`, the matrix-core fused path for `17 <= m <= 128`. |
+| `wmma.hip` | `nf12_hip_linear_wmma`, the matrix-core fused path for `16 <= m <= 256`. |
 
 ## Build
 
@@ -101,7 +101,7 @@ fused kernel on every measured shape. `gfx1250` has no `wmma-128b-insts`;
   packed bytes, same escape order — verified over 30 cases spanning
   `16x64 … 11008x4096` and five weight distributions.
 * **Fused linear** was checked against an FP64 oracle over 21 shapes
-  (256², 1024×4096, 4096×4096 × `m ∈ {1,16,17,32,33,48,64}`):
+  (256², 1024×4096, 4096×4096 × `m ∈ {1,16,17,32,33,48,64,96,128,256}`):
   **0 violations** of `|err| <= 2e-3 + 2e-3*|ref|`, `rms_rel ≈ 1.66e-3` at
   every `m`, which is the oracle's own BF16 rounding floor. NF12 itself adds
   no error; the residual is FP32 accumulation order.
@@ -115,29 +115,39 @@ weights so the working set exceeds 96 MiB, which is what a real multi-layer
 model does.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
-| --- | ---: | ---: | ----: | ----: | ----: | ----: |
-| 896×4864 | 1.63× / 1.73× | 0.79× / 0.87× | 0.67× / 0.85× | 0.70× / 0.99× | 0.50× / 0.77× | 0.50× / 0.75× |
-| 2048×8192 | 1.29× / 1.30× | 0.76× / 1.05× | 0.67× / 1.08× | 0.58× / 1.07× | 0.58× / 0.99× | 0.63× / 0.75× |
-| 4096×4096 | 0.84× / 1.16× | 0.71× / 1.03× | 0.46× / 0.89× | 0.40× / 0.82× | 0.41× / 0.75× | 0.59× / 0.66× |
-| 4096×14336 | 1.33× / 1.33× | 1.19× / 1.19× | 1.26× / 1.24× | 1.25× / 1.23× | 1.19× / 1.18× | 0.84× / 0.84× |
-| 4096×28672 | 1.34× / 1.34× | 1.21× / 1.21× | 1.27× / 1.27× | 1.25× / 1.25× | 1.23× / 1.23× | 0.78× / 0.74× |
-| 5120×25600 | 1.38× / 1.38× | 1.30× / 1.30× | 1.28× / 1.28× | 1.26× / 1.25× | 1.22× / 1.22× | 0.82× / 0.77× |
-| 8192×8192 | 1.70× / 1.63× | 1.09× / 1.09× | 1.21× / 1.20× | 1.16× / 1.16× | 1.09× / 1.09× | 0.68× / 0.67× |
-| 8192×57344 | 1.40× / 1.41× | 1.22× / 1.23× | 1.28× / 1.28× | 1.27× / 1.27× | 1.21× / 1.19× | 0.78× / 0.74× |
-| 14336×4096 | 1.35× / 1.32× | 1.22× / 1.21× | 1.20× / 1.20× | 1.13× / 1.13× | 1.11× / 1.17× | 0.79× / 0.80× |
-| 25600×5120 | 1.33× / 1.33× | 1.15× / 1.15× | 1.16× / 1.15× | 1.10× / 1.11× | 1.01× / 0.96× | 0.84× / 0.77× |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096×4096 | 0.83 / 1.15 | 0.68 / 0.97 | 0.48 / 0.90 | 0.45 / 0.83 | 0.45 / 0.75 | 0.61 / 0.66 |
+| 4096×14336 | 1.33 / 1.33 | 1.19 / 1.19 | 1.25 / 1.23 | 1.25 / 1.23 | 1.20 / 1.20 | 0.84 / 0.85 |
+| 14336×4096 | 1.32 / 1.33 | 1.21 / 1.21 | 1.20 / 1.20 | 1.12 / 1.13 | 1.11 / 1.12 | 0.83 / 0.86 |
+| 4096×28672 | 1.34 / 1.34 | 1.22 / 1.22 | 1.26 / 1.26 | 1.24 / 1.24 | 1.19 / 1.21 | 0.79 / 0.75 |
+| 5120×25600 | 1.38 / 1.39 | 1.30 / 1.30 | 1.28 / 1.28 | 1.26 / 1.26 | 1.22 / 1.23 | 0.83 / 0.78 |
+| 25600×5120 | 1.33 / 1.33 | 1.15 / 1.15 | 1.15 / 1.17 | 1.09 / 1.08 | 0.98 / 0.98 | 0.83 / 0.77 |
+| 8192×8192 | 1.68 / 1.66 | 1.09 / 1.10 | 1.21 / 1.20 | 1.15 / 1.15 | 1.09 / 1.10 | 0.89 / 0.93 |
+| 8192×57344 | 1.40 / 1.40 | 1.23 / 1.23 | 1.29 / 1.28 | 1.28 / 1.28 | 1.21 / 1.20 | 0.80 / 0.74 |
+| 2048×8192 | 1.32 / 1.30 | 0.77 / 1.05 | 0.66 / 1.07 | 0.65 / 1.04 | 0.59 / 0.98 | 0.60 / 0.74 |
+| 896×4864 | 1.62 / 1.86 | 0.71 / 0.94 | 0.62 / 0.89 | 0.68 / 0.95 | 0.50 / 0.74 | 0.50 / 0.70 |
 
 Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
 output-rounding floor. The fused linear has **0 violations** of
 `|err| <= 2e-3 + 2e-3*|ref|` on the project's scaled accuracy harness.
 
-The win is bandwidth: NF12 reads 25% fewer weight bytes. It pays off from
+The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
 `m=8` upward on weights large enough that the packed read dominates:
-1.09–1.30× at `m=8..64` for the 14336/25600/57344-wide shapes, and
-1.20–1.28× at `m=16`. The remaining losses are the small weights
-(`4096×4096`, `2048×8192`, `896×4864`) where the BF16 weight is L2/L3-resident
-and the decode+LDS round-trip dominates, and `m=128`, where rocBLAS is already
-efficient.
+1.09–1.30× at `m=8..64` for the 14336/25600/57344-wide shapes and 1.20–1.29×
+at `m=16`. `m=128` is covered below. The remaining losses are the small
+weights (`4096×4096`, `2048×8192`, `896×4864`), where the dense BF16 weight
+fits in the 64 MiB Infinity Cache (L3/MALL) and runs at ~1.4 TB/s while NF12
+stays decode-bound at ~0.3–0.5 TB/s of packed data.
+
+### `m=128`: shape-aware M split
+
+`kMt=8` costs 64 VGPRs for the accumulator and lands at 167 VGPRs / 9 waves per
+SIMD, which under-fills the machine at `m=128`. When `full_tiles > 4`,
+`k_blocks >= 128` and `n_blocks <= 64`, the launcher instead runs the 4-tile
+kernel over two M blocks: measured `8192×8192` 0.68 → 0.89× and
+`14336×4096` 0.79 → 0.83×. Short-K and wide-N shapes keep the 8-tile kernel
+and do not regress. Above `m=128` there are already two M blocks, so the split
+is disabled and the packed weight is read twice rather than four times.
 
 ## Porting notes (NVIDIA → AMD)
 

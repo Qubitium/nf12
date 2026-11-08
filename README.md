@@ -82,13 +82,17 @@ route.
 
 Correctness and performance on the R9700: decode is bit-exact, encode is
 byte-identical to the reference codec, and fused linear has 0 violations of
-`|err| <= 2e-3 + 2e-3*|ref|` over 21 shapes (`rms_rel ~1.66e-3`, the FP64
-oracle's own BF16 rounding floor). Against a dense BF16 GEMM, on the same
-`k x n` grid as the CUDA benchmarks (`bench/common.py`), the HIP kernel is
-1.09-1.30x faster at `m=8..64` for the large 14336/25600/57344-wide weights and
-1.20-1.28x at `m=16`, while the small weights (`4096x4096`, `2048x8192`,
-`896x4864`) stay slower because their BF16 weight is L2/L3-resident. Full
-tables and porting notes are in [`csrc/hip/README.md`](csrc/hip/README.md).
+`|err| <= 2e-3 + 2e-3*|ref|` over 21 shapes for
+`m ∈ {1,16,17,32,33,48,64,96,128,256}` (`rms_rel ~1.66e-3`, the FP64 oracle's
+own BF16 rounding floor). Against a dense BF16 GEMM, on the same `k x n` grid
+as the CUDA benchmarks (`bench/common.py`), the HIP kernel is 1.09-1.30x faster
+at `m=8..64` for the large 14336/25600/57344-wide weights and 1.20-1.29x at
+`m=16`; at `m=128` a shape-aware M split lifts `8192x8192` from 0.68x to 0.89x
+and `14336x4096` from 0.79x to 0.83x. The small weights (`4096x4096`,
+`2048x8192`, `896x4864`) stay slower because their dense BF16 weight fits in
+the 64 MiB Infinity Cache (L3/MALL) and runs at ~1.4 TB/s while NF12 is
+decode-bound. Full tables and porting notes are in
+[`csrc/hip/README.md`](csrc/hip/README.md).
 
 ## Python
 
