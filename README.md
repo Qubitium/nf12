@@ -90,12 +90,12 @@ at `m=16..64` for the large 14336/25600/57344-wide weights. On the small
 weights four fixes — storing straight out of the decoder's layout (no
 `ds_bpermute` transpose, conflict-free `STS.32`), a padded shared stride,
 hoisting the loads over the mma, and capping the split-K reduce grid at 128
-blocks — took `896x4864` from 0.62x to 1.14x, `2048x8192` from 0.66x to 1.02x
-and `4096x4096` from 0.48x to 0.87x at `m=16`. Every small shape is at or above
-parity on the cold (cache-cycling) path except `4096x4096` at `m=128` (0.69x);
-warm, `4096x4096` still sits at 0.87x at `m=16` because 32 CTAs is one per CU,
+blocks — took `896x4864` from 0.62x to 1.25x, `2048x8192` from 0.66x to 1.03x
+and `4096x4096` from 0.48x to 0.89x at `m=16`. All three are at or above parity
+on the cold (cache-cycling) path at `m=16` (1.10x / 1.23x / 1.25x);
+warm, `4096x4096` still sits at 0.89x at `m=16` because 32 CTAs is one per CU,
 so the kernel is memory-latency-bound against the 64 MiB Infinity Cache.
-`m=128` on the large shapes stays 0.75-1.13x because rocBLAS is already near
+`m=128` on the large shapes stays 0.75-1.20x because rocBLAS is already near
 the HBM roofline.
 
 Full tables and porting notes are in

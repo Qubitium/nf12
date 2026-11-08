@@ -116,24 +116,25 @@ model does.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096×4096 | 0.93 / 1.21 | 0.69 / 0.99 | 0.87 / 1.09 | 0.75 / 1.07 | 0.69 / 0.96 | 0.64 / 0.69 |
-| 4096×14336 | 1.33 / 1.33 | 1.19 / 1.19 | 1.24 / 1.23 | 1.18 / 1.16 | 1.14 / 1.15 | 0.77 / 0.82 |
-| 14336×4096 | 1.35 / 1.35 | 1.21 / 1.21 | 1.33 / 1.33 | 1.23 / 1.25 | 1.17 / 1.21 | 1.08 / 1.09 |
-| 4096×28672 | 1.34 / 1.34 | 1.21 / 1.22 | 1.14 / 1.13 | 1.07 / 1.07 | 0.96 / 0.96 | 0.76 / 0.67 |
-| 5120×25600 | 1.38 / 1.38 | 1.30 / 1.30 | 1.21 / 1.21 | 1.14 / 1.13 | 1.04 / 1.04 | 0.80 / 0.75 |
-| 25600×5120 | 1.33 / 1.33 | 1.15 / 1.16 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.20 | 1.15 / 1.10 |
-| 8192×8192 | 1.69 / 1.64 | 1.09 / 1.10 | 1.29 / 1.28 | 1.30 / 1.30 | 1.24 / 1.24 | 0.78 / 0.75 |
-| 8192×57344 | 1.40 / 1.40 | 1.22 / 1.22 | 1.22 / 1.22 | 1.22 / 1.22 | 1.15 / 1.14 | 0.78 / 0.74 |
-| 2048×8192 | 1.33 / 1.31 | 0.78 / 1.05 | 1.02 / 1.23 | 0.92 / 1.20 | 0.76 / 1.11 | 0.66 / 0.74 |
-| 896×4864 | 1.62 / 1.98 | 0.69 / 0.94 | 1.14 / 1.09 | 1.16 / 1.64 | 0.83 / 1.39 | 0.53 / 0.71 |
+| 4096×4096 | 0.84 / 1.16 | 0.67 / 1.05 | 0.89 / 1.10 | 0.72 / 1.06 | 0.65 / 0.93 | 0.66 / 0.69 |
+| 4096×14336 | 1.33 / 1.33 | 1.19 / 1.19 | 1.24 / 1.23 | 1.18 / 1.16 | 1.16 / 1.16 | 0.82 / 0.76 |
+| 14336×4096 | 1.35 / 1.33 | 1.22 / 1.21 | 1.33 / 1.33 | 1.24 / 1.24 | 1.20 / 1.21 | 1.08 / 1.06 |
+| 4096×28672 | 1.33 / 1.33 | 1.22 / 1.21 | 1.14 / 1.14 | 1.07 / 1.07 | 0.96 / 0.96 | 0.75 / 0.68 |
+| 5120×25600 | 1.38 / 1.38 | 1.30 / 1.30 | 1.21 / 1.21 | 1.14 / 1.13 | 1.04 / 1.04 | 0.80 / 0.74 |
+| 25600×5120 | 1.33 / 1.33 | 1.15 / 1.15 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.20 | 1.20 / 1.11 |
+| 8192×8192 | 1.64 / 1.62 | 1.09 / 1.09 | 1.29 / 1.29 | 1.28 / 1.28 | 1.24 / 1.24 | 0.79 / 0.71 |
+| 8192×57344 | 1.41 / 1.40 | 1.23 / 1.23 | 1.22 / 1.22 | 1.21 / 1.21 | 1.15 / 1.14 | 0.77 / 0.74 |
+| 2048×8192 | 1.33 / 1.30 | 0.80 / 1.05 | 1.03 / 1.23 | 0.94 / 1.18 | 0.74 / 1.11 | 0.66 / 0.74 |
+| 896×4864 | 1.63 / 1.72 | 0.83 / 0.87 | 1.25 / 1.25 | 1.21 / 1.63 | 0.80 / 1.34 | 0.51 / 0.74 |
 
 Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
 output-rounding floor. The fused linear has **0 violations** of
 `|err| <= 2e-3 + 2e-3*|ref|` on the project's scaled accuracy harness.
 
 The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
-`m=8` upward on weights large enough that the packed read dominates.
-1.14–1.35× at `m=16..64` for the 14336/25600/57344-wide shapes.
+`m=8` upward on weights large enough that the packed read dominates. Across the
+seven 14336/25600/57344-wide shapes it is 1.07–1.35× at `m=16..32` and
+0.96–1.24× at `m=64`.
 
 ### Small weights: four fixes that took them from ~0.5× to parity
 
@@ -175,21 +176,23 @@ rather than paying four prologues for three super-atoms each.
 
 | k × n | m=16 before | m=16 after | m=64 before | m=64 after |
 | --- | ---: | ---: | ---: | ---: |
-| 4096×4096 | 0.48× | **0.87×** (cold 1.09×) | 0.45× | **0.69×** |
-| 2048×8192 | 0.66× | **1.02×** (cold 1.23×) | 0.59× | **0.76×** |
-| 896×4864 | 0.62× | **1.14×** (cold 1.09×) | 0.50× | **0.83×** |
+| 4096×4096 | 0.48× | **0.89×** (cold 1.10×) | 0.45× | **0.65×** |
+| 2048×8192 | 0.66× | **1.03×** (cold 1.23×) | 0.59× | **0.74×** |
+| 896×4864 | 0.62× | **1.25×** (cold 1.25×) | 0.50× | **0.80×** |
 | 25600×5120 | 1.15× | **1.35×** | 0.98× | **1.21×** |
 
-`4096×4096` at `m=16` is 0.87× warm but 1.09× cold: the 24 MiB packed weight
+`4096×4096` at `m=16` is 0.89× warm but 1.10× cold: the 24 MiB packed weight
 fits in the 64 MiB Infinity Cache, so warm BF16 runs at ~1.4 TB/s while cold
 BF16 falls back to the ~633 GB/s HBM ceiling. Its 4096 output columns give only
 32 CTAs — one per CU, two warps per SIMD — so the warm case is
-memory-latency-bound rather than bandwidth-bound. `m=32..128` on the three
-small shapes (0.64–0.75× warm, 0.69–1.64× cold) are the remaining gap: eight
-token tiles per CTA halve the CTA count, and the extra packed reads are only
-paid back once the weight leaves the cache. Cold is the regime a real
-multi-layer model sees, and every small shape is at or above parity there
-except `4096×4096` at `m=128` (0.69×).
+memory-latency-bound rather than bandwidth-bound.
+
+Cold — the regime a real multi-layer model sees — all three small shapes are at
+or above parity at `m=16` (1.10× / 1.23× / 1.25×). Above that the gap is
+0.51–1.21× warm and 0.69–1.63× cold: eight token tiles per CTA halve the CTA
+count, and the extra packed reads are only paid back once the weight leaves the
+cache. Still below parity cold: `4096×4096` at `m=64` (0.93×) and all three at
+`m=128` (0.69× / 0.74× / 0.74×).
 
 ## Porting notes (NVIDIA → AMD)
 
