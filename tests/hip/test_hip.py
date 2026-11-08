@@ -4,7 +4,11 @@
 
 The CUDA torch extension is not built on ROCm, so these tests drive the plain
 C API in ``include/nf12/nf12_hip.h`` through ctypes. Accuracy uses the same
-``|err| <= 2e-3 + 2e-3*|ref|`` gate as the CUDA tests, against an FP64 oracle.
+``|err| <= 2e-3 + 2e-3*|ref|`` gate as the CUDA tests.
+
+The primary contract test is against a BF16 twin (SPEC.md section 6.2): NF12
+adds zero error relative to a BF16 GEMM on the exactly-decoded weight. The FP64
+oracle is kept as a tighter secondary check.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import threading
 import nf12
 import pytest
 import torch
+import torch.nn.functional as F
 from nf12 import reference
 
 
@@ -207,6 +212,41 @@ def test_wmma_linear_matches_fp64_oracle(lib, m):
     packed, escapes, exp_base = _encode(lib, w)
     ref = x.double() @ w.double().t()
     assert _violations(_linear(lib, x, packed, escapes, exp_base), ref) == 0
+
+
+@pytest.mark.parametrize("m", [1, 4, 15])
+def test_fused_linear_matches_bf16_twin(lib, m):
+    """SPEC.md 6.2: the contract is BF16-in/BF16-out, not an FP64 ideal.
+
+    The twin is a BF16 GEMM over the exactly-decoded weight, i.e. the same
+    numbers the caller would get from ``decode`` + ``F.linear``.
+    """
+    torch.manual_seed(m)
+    n, k = 1024, 4096
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = _encode(lib, w)
+    decoded = _decode(lib, packed, escapes, exp_base)
+    assert torch.equal(decoded.view(torch.int16), w.view(torch.int16))
+    ref = F.linear(x, decoded)
+    assert _violations(_linear(lib, x, packed, escapes, exp_base), ref.double()) == 0
+
+
+@pytest.mark.parametrize("m", [16, 17, 32, 64, 128, 256])
+def test_wmma_linear_matches_bf16_twin(lib, m):
+    """SPEC.md 6.2 contract for the matrix-core route."""
+    if lib.nf12_hip_wmma_supported(m) == 0:
+        pytest.skip(f"wmma path not available for m={m}")
+    torch.manual_seed(m)
+    n, k = 1024, 4096
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    bias = torch.full((n,), 0.125, dtype=torch.bfloat16, device="cuda")
+    packed, escapes, exp_base = _encode(lib, w)
+    decoded = _decode(lib, packed, escapes, exp_base)
+    ref = F.linear(x, decoded, bias)
+    got = _linear(lib, x, packed, escapes, exp_base, bias)
+    assert _violations(got, ref.double()) == 0
 
 
 def test_wmma_split_k_requires_workspace(lib):

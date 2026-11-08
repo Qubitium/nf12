@@ -112,10 +112,13 @@ fused kernel on every measured shape. `gfx1250` has no `wmma-128b-insts`;
 * **Encode** is byte-identical to the reference codec — same `exp_base`, same
   packed bytes, same escape order — verified over 30 cases spanning
   `16x64 … 11008x4096` and five weight distributions.
-* **Fused linear** was checked against an FP64 oracle over 21 shapes
-  (256², 1024×4096, 4096×4096 × `m ∈ {1,16,17,32,33,48,64,96,128,256}`):
-  **0 violations** of `|err| <= 2e-3 + 2e-3*|ref|`, `rms_rel ≈ 1.66e-3` at
-  every `m`, which is the oracle's own BF16 rounding floor. NF12 itself adds
+* **Fused linear** is gated on the contract in SPEC.md §6.2: it must equal a
+  BF16 GEMM over the *exactly decoded* weight. The test computes that twin
+  (`decode` + `torch.nn.functional.linear`, both BF16) and requires **0
+  violations** of `|err| <= 2e-3 + 2e-3*|ref|`. A separate FP64 oracle is
+  kept as a tighter secondary check over 21 shapes (256², 1024×4096, 4096×4096
+  × `m ∈ {1,16,17,32,33,48,64,96,128,256}`); it also reports 0 violations with
+  `rms_rel ≈ 1.66e-3`, the oracle's own BF16 rounding floor. NF12 itself adds
   no error; the residual is FP32 accumulation order.
 
 ## Performance (R9700, `gfx1201`, 32 CUs, wave32)
