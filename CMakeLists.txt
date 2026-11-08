@@ -41,7 +41,7 @@ endif()
 install(FILES CMakeLists.txt DESTINATION nf12/_src)
 install(DIRECTORY csrc include DESTINATION nf12/_src
   FILES_MATCHING PATTERN "*.cu" PATTERN "*.cpp" PATTERN "*.cuh"
-  PATTERN "*.h" PATTERN "*.map")
+  PATTERN "*.h" PATTERN "*.map" PATTERN "*.hip")
 if(NOT NF12_BUILD_NATIVE)
   return()
 endif()
@@ -130,4 +130,13 @@ if(NF12_BUILD_TORCH)
     BUILD_RPATH "$ORIGIN;${NF12_TORCH_DIR}/lib"
     INSTALL_RPATH "$ORIGIN")
   install(TARGETS nf12_torch LIBRARY DESTINATION nf12)
+endif()
+
+# RDNA4 (gfx1200/gfx1201) HIP kernels. Off by default, and additive: enabling it
+# does not change any CUDA target. The subtree also builds standalone without a
+# CUDA toolkit via `cmake -S csrc/hip -B build-hip`.
+option(NF12_ENABLE_HIP "Build the RDNA4 HIP kernels (libnf12_hip.so)" OFF)
+if(NF12_ENABLE_HIP)
+  enable_language(HIP)
+  add_subdirectory(csrc/hip)
 endif()
