@@ -34,5 +34,9 @@ set_target_properties(nf12_hip PROPERTIES
   HIP_ARCHITECTURES "${NF12_HIP_ARCHS}"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
+# Install next to libnf12.so (the top-level CUDA target also installs to
+# ``nf12``), so a native HIP build can be packaged the same way as a CUDA one.
+install(TARGETS nf12_hip LIBRARY DESTINATION nf12)
+
 # --use_fast_math would violate the numerical contract in SPEC.md section 6.
 target_compile_options(nf12_hip PRIVATE -O3 -Wall -Wextra)
