@@ -30,7 +30,7 @@ def library_path(name: str | None = None) -> Path:
     for directory in nf12.__path__:
         candidate = Path(directory) / name
         if candidate.is_file():
-            if name == "libnf12_torch.so" and not candidate.with_name("libnf12.so").is_file():
+            if name == "libnf12_torch.so" and not candidate.with_name(_native_library_name()).is_file():
                 continue
             return candidate
     if name in ("libnf12.so", "libnf12_torch.so", "libnf12_hip.so"):
@@ -50,16 +50,6 @@ def load() -> None:
     with _lock:
         if _loaded:
             return
-        if torch.version.hip is not None:
-            # The C ABI (include/nf12/nf12_hip.h) is the integration point for
-            # ROCm consumers such as vLLM/Sonar until torch.ops.nf12 is ported;
-            # the kernels and the byte format are already shared with CUDA.
-            raise RuntimeError(
-                "nf12: the torch extension is not available on ROCm yet. The RDNA4 "
-                "kernels build as libnf12_hip.so and expose a C API "
-                "(include/nf12/nf12_hip.h); nf12.nn and torch.ops.nf12 are CUDA-only "
-                "for now."
-            )
         torch.ops.load_library(str(library_path("libnf12_torch.so")))
         _register_fakes()
         _loaded = True

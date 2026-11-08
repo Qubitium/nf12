@@ -20,7 +20,7 @@ import torch
 # The HIP port currently ships only the C library; there is no ROCm torch
 # extension yet, so the two backends produce different sets of artifacts.
 _LIBRARIES_CUDA = ("libnf12.so", "libnf12_torch.so")
-_LIBRARIES_HIP = ("libnf12_hip.so",)
+_LIBRARIES_HIP = ("libnf12_hip.so", "libnf12_torch.so")
 _BUILD_ENV = (
     "CUDACXX", "CUDA_HOME", "CUDA_PATH", "CUDAHOSTCXX", "CXX", "CXXFLAGS",
     "CUDAFLAGS", "LDFLAGS", "NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS",
@@ -144,12 +144,13 @@ def _build(source: Path, directory: Path, archs) -> None:
                 "set CMAKE_HIP_COMPILER or ROCM_PATH to locate it"
             )
         configure = [
-            "-DNF12_BUILD_TORCH=OFF",
+            "-DNF12_BUILD_TORCH=ON",
             "-DNF12_ENABLE_HIP=ON",
             "-DNF12_HIP_ARCHS=" + ";".join(map(str, archs)),
             f"-DCMAKE_HIP_COMPILER={compiler}",
+            f"-DPython_EXECUTABLE={sys.executable}",
         ]
-        targets = ["nf12_hip"]
+        targets = ["nf12_hip", "nf12_torch"]
     else:
         # Import CUDA toolkit discovery only on a cache miss.
         from torch.utils.cpp_extension import CUDA_HOME

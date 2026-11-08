@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-#include <cuda_runtime_api.h>
+#include "nf12/nf12.h"
 #include <cstdint>
 
 namespace nf12::torch_detail {

@@ -69,6 +69,19 @@ inline constexpr int kWarpsPerBlock = 8;
 inline constexpr int kThreadsPerBlock = kWarpsPerBlock * kWarpSize;
 inline constexpr int kSuperAtomVecs = kSuperAtomBytes / 16;  // 96 uint4
 inline constexpr int kPlaneVecs = kPlaneBytes / 16;          // 32 uint4
+inline constexpr int kSuperAtomVecsBf16t = 2048 / 16;        // 128 uint4
+
+// Interleave warps along K so their row-major stores form contiguous segments.
+template <int kPerWarp>
+__device__ __forceinline__ int64_t warp_super_atom(int i) {
+  return (int64_t(blockIdx.x) * kPerWarp + i) * kWarpsPerBlock + (threadIdx.x / kWarpSize);
+}
+
+template <int kPerWarp>
+inline int64_t grid_blocks(int64_t num_sa) {
+  const int64_t per_block = int64_t(kPerWarp) * kWarpsPerBlock;
+  return (num_sa + per_block - 1) / per_block;
+}
 
 struct Group {
   uint32_t meta;

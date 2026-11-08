@@ -38,18 +38,6 @@ namespace {
 // ---------------------------------------------------------------------------
 constexpr int kDecodeSuperAtomsPerWarp = 2;
 
-// Interleave warps along K so their row-major stores form contiguous segments.
-template <int kPerWarp>
-__device__ __forceinline__ int64_t warp_super_atom(int i) {
-  return (int64_t(blockIdx.x) * kPerWarp + i) * kWarpsPerBlock + (threadIdx.x / kWarpSize);
-}
-
-template <int kPerWarp>
-int64_t grid_blocks(int64_t num_sa) {
-  const int64_t per_block = int64_t(kPerWarp) * kWarpsPerBlock;
-  return (num_sa + per_block - 1) / per_block;
-}
-
 // Largest token count the fused kernel handles. Above this, decoding the weight
 // once and running a real GEMM wins (SPEC.md 6.5), so callers fall back.
 constexpr int kFusedMaxM = 16;

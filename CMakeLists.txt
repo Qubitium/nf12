@@ -70,6 +70,10 @@ if(NOT NF12_HAVE_CUDA AND NOT NF12_ENABLE_HIP)
     "CUDA toolkit, or configure with -DNF12_ENABLE_HIP=ON on an ROCm host.")
 endif()
 
+# Shared by both backends: the torch extension is the same op layer on CUDA
+# (linking libnf12.so) and ROCm (linking libnf12_hip.so).
+option(NF12_BUILD_TORCH "Build the torch extension (libnf12_torch.so)" ON)
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -92,8 +96,6 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
-
-option(NF12_BUILD_TORCH "Build the torch extension (libnf12_torch.so)" ON)
 
 # --use_fast_math would violate the numerical contract in SPEC.md section 6.
 # NVCC's warning policy does not cover the host compiler or PTX assembler.
