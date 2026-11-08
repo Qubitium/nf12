@@ -274,7 +274,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     for (int i = 0; i < 8; ++i) {
       const int64_t row = origin + 8 * (lane >> 4) + i;
       if (row < lo || row >= hi) continue;
-      const float v = acc[t][i] + bias_v;
+      // With split-K each split writes its own FP32 partial plane and the
+      // reduce kernel sums them, so bias must be added exactly once across
+      // the splits (adding it in every split multiplied it by kSplits).
+      const float v = acc[t][i] + ((kSplits == 1 || blockIdx.z == 0) ? bias_v : 0.0f);
       if (kSplits == 1) {
         out[row * n + col] = __float2bfloat16(v);
       } else {

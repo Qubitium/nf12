@@ -113,19 +113,20 @@ def _decode(lib, packed, escapes, exp_base):
     return out
 
 
-def _linear(lib, x, packed, escapes, exp_base):
+def _linear(lib, x, packed, escapes, exp_base, bias=None):
     m, k = x.shape
     n = packed.shape[0]
     out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
+    bias_ptr = None if bias is None else bias.data_ptr()
     if m < 16:
         rc = lib.nf12_hip_linear_fused(
             packed.data_ptr(), escapes.data_ptr(), exp_base, x.data_ptr(),
-            out.data_ptr(), n, k, m, None, _stream(),
+            out.data_ptr(), n, k, m, bias_ptr, _stream(),
         )
     else:
         rc = lib.nf12_hip_linear_wmma(
             packed.data_ptr(), escapes.data_ptr(), exp_base, x.data_ptr(),
-            out.data_ptr(), n, k, m, None, _stream(),
+            out.data_ptr(), n, k, m, bias_ptr, _stream(),
         )
     assert rc == 0, rc
     return out
@@ -197,3 +198,26 @@ def test_wmma_linear_matches_fp64_oracle(lib, m):
     packed, escapes, exp_base = _encode(lib, w)
     ref = x.double() @ w.double().t()
     assert _violations(_linear(lib, x, packed, escapes, exp_base), ref) == 0
+
+
+@pytest.mark.parametrize("m", [16, 32, 64, 128])
+def test_wmma_bias_is_added_once(lib, m):
+    """Regression: every split-K partial plane carried the bias, so the reduce
+    kernel multiplied it by kSplits (4x at m<=64, 2x at m=128)."""
+
+    if lib.nf12_hip_wmma_supported(m) == 0:
+        pytest.skip(f"wmma path not available for m={m}")
+    torch.manual_seed(m)
+    # N=1024/K=1024 launches 8 CTAs, so pick_splits chooses 4 (m<=64) or 2.
+    n, k = 1024, 1024
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    bias = torch.full((n,), 0.125, dtype=torch.bfloat16, device="cuda")
+    packed, escapes, exp_base = _encode(lib, w)
+
+    with_bias = _linear(lib, x, packed, escapes, exp_base, bias).double()
+    without = _linear(lib, x, packed, escapes, exp_base).double()
+    delta = (with_bias - without).mean().item()
+    assert abs(delta - 0.125) <= 2e-3, f"bias scaled by {delta / 0.125:.3f}x"
+    ref = x.double() @ w.double().t() + 0.125
+    assert _violations(_linear(lib, x, packed, escapes, exp_base, bias), ref) == 0
