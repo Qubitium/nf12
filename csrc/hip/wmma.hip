@@ -363,30 +363,17 @@ int nf12_hip_wmma_supported(int64_t m) {
   return wmma_arch_ok(device);
 }
 
-// Split workspace, cached per device.
+// There is deliberately NO process-wide split-K scratch here. A static pointer
+// is not per device, and even a per-device one would be shared by concurrent
+// streams: two launches would write the same FP32 partial planes and the reduce
+// pass would mix them, silently corrupting both results. The caller owns the
+// scratch instead (``nf12_hip_linear_wmma_workspace_bytes``), so this file holds
+// no mutable state and concurrent streams are independent.
 //
-// It must NOT be allocated per call: hipMalloc/hipFree are synchronising, and
-// doing them around every launch measured +110 us at m=32 (147 us instead of
-// 38 us), which completely erased the win split-K buys. The buffer is a plain
-// process-wide scratch pointer that never escapes this file, grows on demand,
-// and is sized once per (splits, m, n) shape seen.
-static float* g_partial = nullptr;
-static size_t g_partial_bytes = 0;
-
-static hipError_t ensure_partial(size_t bytes) {
-  if (bytes <= g_partial_bytes) return hipSuccess;
-  if (g_partial != nullptr) {
-    if (hipFree(g_partial) != hipSuccess) return hipErrorOutOfMemory;
-    g_partial = nullptr;
-    g_partial_bytes = 0;
-  }
-  if (hipMalloc(&g_partial, bytes) != hipSuccess) {
-    g_partial = nullptr;
-    return hipErrorOutOfMemory;
-  }
-  g_partial_bytes = bytes;
-  return hipSuccess;
-}
+// Do not "optimise" this back into a hipMalloc per call either: hipMalloc and
+// hipFree synchronise the device, and doing them around every launch measured
+// +110 us at m=32 (147 us instead of 38 us), which erased the whole split-K win.
+// A caller-side caching allocator (PyTorch's, for example) avoids both problems.
 
 // Split count for a given problem. A split reads a DISJOINT k slice, so the
 // packed weight is never read twice; the cost is the per-split FP32 partial
@@ -434,22 +421,21 @@ static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   return 1;
 }
 
-// `out` is [m, n] row-major BF16; `x` is [m, k].
-//
-// Tiles per CTA are chosen so the CTA covers the caller's M with as few
-// instantiated tiles as possible: a 32-token call runs a 2-tile kernel instead
-// of an 8-tile one. Both cover the same tokens; the 2-tile version just skips
-// matrix-core work (and shared-memory traffic) that the tail tiles would have
-// thrown away. Every tile count in [1, kMaxTiles] is instantiated so the choice
-// stays a compile-time bound inside the kernel.
-hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                              const void* x, void* out, int64_t n, int64_t k, int64_t m,
-                              const void* bias, hipStream_t stream) {
-  if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
-  if (m < 16 || m > nf12_hip_wmma_max_m()) return hipErrorInvalidValue;
-  if (n % kSuperAtomRows != 0) return hipErrorInvalidValue;
+// Everything the workspace query and the launch must agree on. Factoring it out
+// is what guarantees the size the caller allocates is exactly the size the
+// kernel writes.
+struct WmmaPlan {
+  int64_t n_blocks;
+  int tiles;
+  int64_t m_blocks;
+  int splits;
+};
 
-  const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
+static WmmaPlan wmma_plan(int64_t n, int64_t k, int64_t m) {
+  WmmaPlan plan{};
+  plan.n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
+  plan.splits = 1;
+  if (m < 16 || m > 2 * kMaxTokens) return plan;
 
   const int full_tiles = static_cast<int>((m + 15) / 16);
   // At kMt=8 the 8x8 FP32 accumulator costs 64 VGPRs and the kernel lands at
@@ -467,25 +453,55 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uin
   // Wide N (>64 blocks) is excluded outright, and above m=128 there are already
   // two M-blocks so the launch is not starved and splitting only re-reads.
   const int64_t k_blocks = k / kSuperAtomCols;
-  const bool split_m = full_tiles > 4 && full_tiles <= 8 && n_blocks <= 64 &&
-                       (k_blocks >= 128 || n_blocks <= 40);
-  const int tiles = split_m ? 4 : full_tiles;
+  const bool split_m = full_tiles > 4 && full_tiles <= 8 && plan.n_blocks <= 64 &&
+                       (k_blocks >= 128 || plan.n_blocks <= 40);
+  plan.tiles = split_m ? 4 : full_tiles;
   // The dispatcher clamps anything above kMaxTiles to the kMaxTiles kernel, so
   // the tokens one CTA actually covers is min(tiles, kMaxTiles)*16. Deriving
   // m_blocks from the UNCLAMPED tile count dropped the second M block at
   // m=256 (tiles=16 -> m_blocks=1, but only 8 tiles are launched).
-  const int64_t launch_tiles = (tiles < kMaxTiles) ? tiles : kMaxTiles;
-  const int64_t m_blocks = (m + launch_tiles * 16 - 1) / (launch_tiles * 16);
+  const int64_t launch_tiles = (plan.tiles < kMaxTiles) ? plan.tiles : kMaxTiles;
+  plan.m_blocks = (m + launch_tiles * 16 - 1) / (launch_tiles * 16);
+  if (plan.n_blocks == 0 || plan.m_blocks == 0) return plan;
+  plan.splits = pick_splits(plan.n_blocks * plan.m_blocks, m, k_blocks);
+  return plan;
+}
+
+size_t nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
+  const WmmaPlan plan = wmma_plan(n, k, m);
+  if (plan.splits <= 1 || m <= 0 || n <= 0) return 0;
+  return size_t(plan.splits) * size_t(m) * size_t(n) * sizeof(float);
+}
+
+// `out` is [m, n] row-major BF16; `x` is [m, k].
+//
+// Tiles per CTA are chosen so the CTA covers the caller's M with as few
+// instantiated tiles as possible: a 32-token call runs a 2-tile kernel instead
+// of an 8-tile one. Both cover the same tokens; the 2-tile version just skips
+// matrix-core work (and shared-memory traffic) that the tail tiles would have
+// thrown away. Every tile count in [1, kMaxTiles] is instantiated so the choice
+// stays a compile-time bound inside the kernel.
+hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                              const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                              const void* bias, void* workspace, size_t workspace_bytes,
+                              hipStream_t stream) {
+  if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
+  if (m < 16 || m > nf12_hip_wmma_max_m()) return hipErrorInvalidValue;
+  if (n % kSuperAtomRows != 0) return hipErrorInvalidValue;
+
+  const WmmaPlan plan = wmma_plan(n, k, m);
+  const int64_t n_blocks = plan.n_blocks;
+  const int tiles = plan.tiles;
+  const int64_t m_blocks = plan.m_blocks;
   if (n_blocks == 0 || m_blocks == 0) return hipSuccess;
   if (n_blocks > 0x7fffLL || m_blocks > 0x7fffLL) return hipErrorInvalidValue;
-  const int splits = pick_splits(n_blocks * m_blocks, m, k_blocks);
+  const int splits = plan.splits;
 
   float* partial = nullptr;
   if (splits > 1) {
-    const size_t bytes = size_t(splits) * size_t(m) * size_t(n) * sizeof(float);
-    const hipError_t alloc = ensure_partial(bytes);
-    if (alloc != hipSuccess) return alloc;
-    partial = g_partial;
+    const size_t needed = nf12_hip_linear_wmma_workspace_bytes(n, k, m);
+    if (workspace == nullptr || workspace_bytes < needed) return hipErrorInvalidValue;
+    partial = static_cast<float*>(workspace);
   }
 
   const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_blocks),

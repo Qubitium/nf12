@@ -75,16 +75,28 @@ hipError_t nf12_hip_linear_fused(const uint8_t* packed, const uint4* escapes,
 
 int        nf12_hip_wmma_max_m(void);
 int        nf12_hip_wmma_supported(int64_t m);
+size_t     nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k,
+                                                int64_t m);
 hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes,
                                 uint32_t exp_base, const void* x, void* out,
                                 int64_t n, int64_t k, int64_t m,
-                                const void* bias, hipStream_t stream);
+                                const void* bias, void* workspace,
+                                size_t workspace_bytes, hipStream_t stream);
 
 hipError_t nf12_hip_selftest(uint32_t* out, hipStream_t stream);
 ```
 
 `analyze` and `encode` synchronize the supplied stream and cannot be graph
 captured, matching the CUDA contract.
+
+The library holds no mutable device state. The split-K reduction scratch for
+`nf12_hip_linear_wmma` is owned by the caller: query
+`nf12_hip_linear_wmma_workspace_bytes(n, k, m)` and pass a buffer of at least
+that size (0 bytes means the chosen launch does not split K). A null or short
+buffer is rejected with `hipErrorInvalidValue` rather than aliased, so
+concurrent streams and concurrent host threads are independent. An earlier
+revision cached a single process-wide pointer, which was neither per device nor
+per stream; do not reintroduce it.
 
 Route selection by token count: `m <= 15` uses the fused small-M kernel,
 `16 <= m <= 256` the matrix-core path, and larger `m` falls back to

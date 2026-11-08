@@ -51,9 +51,12 @@ def _bind(path: Path):
     lib.nf12_hip_wmma_supported.restype = _INT
     lib.nf12_hip_wmma_supported = lib.nf12_hip_wmma_supported
     lib.nf12_hip_wmma_supported.argtypes = [_I64]
+    lib.nf12_hip_linear_wmma_workspace_bytes.restype = _SIZE
+    lib.nf12_hip_linear_wmma_workspace_bytes.argtypes = [_I64, _I64, _I64]
     lib.nf12_hip_linear_wmma.restype = _INT
     lib.nf12_hip_linear_wmma.argtypes = [
-        _VOID, _VOID, _U8, _VOID, _VOID, _I64, _I64, _I64, _VOID, _VOID]
+        _VOID, _VOID, _U8, _VOID, _VOID, _I64, _I64, _I64, _VOID,
+        _VOID, _SIZE, _VOID]
     return lib
 
 
@@ -86,7 +89,7 @@ def main() -> None:
         assert rc == 0, rc
         return packed, escapes, int(eb.value)
 
-    def linear(x, packed, escapes, eb):
+    def linear(x, packed, escapes, eb, ws, ws_bytes):
         m, k = x.shape
         n = packed.shape[0]
         out = torch.empty((m, n), dtype=torch.bfloat16, device=dev)
@@ -95,7 +98,8 @@ def main() -> None:
                                            x.data_ptr(), out.data_ptr(), n, k, m, None, stream)
         elif m <= max_m and lib.nf12_hip_wmma_supported(m):
             rc = lib.nf12_hip_linear_wmma(packed.data_ptr(), escapes.data_ptr(), eb,
-                                              x.data_ptr(), out.data_ptr(), n, k, m, None, stream)
+                                          x.data_ptr(), out.data_ptr(), n, k, m, None,
+                                          ws.data_ptr(), ws_bytes, stream)
         else:
             wd = torch.empty((n, k), dtype=torch.bfloat16, device=dev)
             rc = lib.nf12_hip_decode(packed.data_ptr(), escapes.data_ptr(), eb, n, k,
@@ -133,21 +137,31 @@ def main() -> None:
             g = torch.Generator(device="cpu").manual_seed(c)
             w = (torch.randn(n, k, generator=g, dtype=torch.float32) * 0.02).to(torch.bfloat16).to(dev)
             sets.append((w, *encode(w)))
+        # Exactly-decoded weight: the operand of the BF16 twin the spec (6.2)
+        # compares against. Decoding is outside every timed region.
+        w0, p0, e0, b0 = sets[0]
+        wd = torch.empty((n, k), dtype=torch.bfloat16, device=dev)
+        rc = lib.nf12_hip_decode(p0.data_ptr(), e0.data_ptr(), b0, n, k,
+                                 wd.data_ptr(), k, stream)
+        assert rc == 0, rc
         for m in ms:
             g = torch.Generator(device="cpu").manual_seed(100 + m)
             x = (torch.randn(m, k, generator=g, dtype=torch.float32) * 0.05).to(torch.bfloat16).to(dev)
-            w0, p0, e0, b0 = sets[0]
-            got = linear(x, p0, e0, b0)
-            ref = x.double() @ w0.double().t()
-            err = (got.double() - ref).abs()
-            viol = int((err > 2e-3 + 2e-3 * ref.abs()).sum())
-            rms = (err.pow(2).mean().sqrt() / ref.pow(2).mean().sqrt()).item()
-            tn = best(lambda x=x, p0=p0, e0=e0, b0=b0: linear(x, p0, e0, b0))
+            # Caller-owned split-K scratch, allocated once per shape and reused
+            # so the timed loop measures the kernel, not the allocator.
+            ws_bytes = lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m)
+            ws = torch.empty(max(ws_bytes, 1), dtype=torch.uint8, device=dev)
+            got = linear(x, p0, e0, b0, ws, ws_bytes)
+            ref = F.linear(x, wd)
+            err = (got.double() - ref.double()).abs()
+            viol = int(((err > 2e-3 + 2e-3 * ref.double().abs()) | ~torch.isfinite(got)).sum())
+            rms = (err.pow(2).mean().sqrt() / ref.double().pow(2).mean().sqrt()).item()
+            tn = best(lambda x=x: linear(x, p0, e0, b0, ws, ws_bytes))
             tb = best(lambda x=x, w0=w0: F.linear(x, w0))
 
-            def cold_n(sets=sets, x=x):
+            def cold_n(sets=sets, x=x, ws=ws, ws_bytes=ws_bytes):
                 for (_, p_, e_, b_) in sets:
-                    linear(x, p_, e_, b_)
+                    linear(x, p_, e_, b_, ws, ws_bytes)
 
             def cold_b(sets=sets, x=x):
                 for (w_, _, _, _) in sets:

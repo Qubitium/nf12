@@ -6,7 +6,9 @@
  * layer, so include this header rather than nf12.h.
  *
  * Pointers refer to device memory. Weight descriptors and analysis outputs are
- * host-resident. No function allocates device memory. nf12_hip_encode_analyze
+ * host-resident. No function allocates device memory and the library keeps no
+ * mutable device state, so calls on different streams (or from different host
+ * threads) never share scratch and are independent. nf12_hip_encode_analyze
  * and nf12_hip_encode synchronize the supplied stream.
  */
 #ifndef NF12_NF12_HIP_H_
@@ -55,9 +57,16 @@ hipError_t nf12_hip_linear_fused(const uint8_t* packed, const uint4* escapes,
  * the caller should use decode-then-rocBLAS instead. */
 int nf12_hip_wmma_max_m(void);
 int nf12_hip_wmma_supported(int64_t m);
+
+/* Device scratch for the split-K reduction, owned by the caller. Returns 0 when
+ * the launch chosen for (n, k, m) needs no scratch. Allocate at least this many
+ * bytes on the same device and pass the same shape to nf12_hip_linear_wmma;
+ * a null or undersized buffer is rejected rather than silently aliased. */
+size_t nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m);
 hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes,
                                 uint32_t exp_base, const void* x, void* out,
                                 int64_t n, int64_t k, int64_t m, const void* bias,
+                                void* workspace, size_t workspace_bytes,
                                 hipStream_t stream);
 
 /* Launches a kernel that stamps 0x4E463132. Fails loudly if the build produced

@@ -10,6 +10,7 @@ C API in ``include/nf12/nf12_hip.h`` through ctypes. Accuracy uses the same
 from __future__ import annotations
 
 import ctypes
+import threading
 
 import nf12
 import pytest
@@ -69,9 +70,12 @@ def lib():
     lib.nf12_hip_wmma_max_m.argtypes = []
     lib.nf12_hip_wmma_supported.restype = _INT
     lib.nf12_hip_wmma_supported.argtypes = [_I64]
+    lib.nf12_hip_linear_wmma_workspace_bytes.restype = _SIZE
+    lib.nf12_hip_linear_wmma_workspace_bytes.argtypes = [_I64, _I64, _I64]
     lib.nf12_hip_linear_wmma.restype = _INT
     lib.nf12_hip_linear_wmma.argtypes = [
-        _VOID, _VOID, _U8, _VOID, _VOID, _I64, _I64, _I64, _VOID, _VOID,
+        _VOID, _VOID, _U8, _VOID, _VOID, _I64, _I64, _I64, _VOID,
+        _VOID, _SIZE, _VOID,
     ]
     return lib
 
@@ -124,9 +128,11 @@ def _linear(lib, x, packed, escapes, exp_base, bias=None):
             out.data_ptr(), n, k, m, bias_ptr, _stream(),
         )
     else:
+        ws_bytes = lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m)
+        ws = torch.empty(max(ws_bytes, 1), dtype=torch.uint8, device=x.device)
         rc = lib.nf12_hip_linear_wmma(
             packed.data_ptr(), escapes.data_ptr(), exp_base, x.data_ptr(),
-            out.data_ptr(), n, k, m, bias_ptr, _stream(),
+            out.data_ptr(), n, k, m, bias_ptr, ws.data_ptr(), ws_bytes, _stream(),
         )
     assert rc == 0, rc
     return out
@@ -201,6 +207,82 @@ def test_wmma_linear_matches_fp64_oracle(lib, m):
     packed, escapes, exp_base = _encode(lib, w)
     ref = x.double() @ w.double().t()
     assert _violations(_linear(lib, x, packed, escapes, exp_base), ref) == 0
+
+
+def test_wmma_split_k_requires_workspace(lib):
+    """The split-K scratch is caller-owned; a null or short buffer is rejected.
+
+    Regression for the process-wide ``g_partial`` pointer: two concurrent
+    streams used to share one partial plane and corrupt each other.
+    """
+    n, k, m = 1024, 4096, 64
+    assert lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m) > 0
+    torch.manual_seed(3)
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = _encode(lib, w)
+    out = torch.empty((m, n), dtype=torch.bfloat16, device="cuda")
+    need = lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m)
+    args = (packed.data_ptr(), escapes.data_ptr(), exp_base, x.data_ptr(),
+            out.data_ptr(), n, k, m, None)
+    assert lib.nf12_hip_linear_wmma(*args, None, 0, _stream()) != 0
+    short = torch.empty(need - 1, dtype=torch.uint8, device="cuda")
+    assert lib.nf12_hip_linear_wmma(
+        *args, short.data_ptr(), short.numel(), _stream()) != 0
+
+
+def test_wmma_concurrent_streams_are_independent(lib):
+    if lib.nf12_hip_wmma_supported(64) == 0:
+        pytest.skip("wmma path not available")
+    torch.manual_seed(5)
+    n, k, m = 1024, 4096, 64
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    x1 = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    x2 = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = _encode(lib, w)
+    ref1 = _linear(lib, x1, packed, escapes, exp_base)
+    ref2 = _linear(lib, x2, packed, escapes, exp_base)
+
+    s1, s2 = torch.cuda.Stream(), torch.cuda.Stream()
+    current = torch.cuda.current_stream()
+    s1.wait_stream(current)
+    s2.wait_stream(current)
+    with torch.cuda.stream(s1):
+        got1 = _linear(lib, x1, packed, escapes, exp_base)
+    with torch.cuda.stream(s2):
+        got2 = _linear(lib, x2, packed, escapes, exp_base)
+    torch.cuda.synchronize()
+    assert torch.equal(got1, ref1)
+    assert torch.equal(got2, ref2)
+
+
+def test_wmma_concurrent_host_threads(lib):
+    """Free-threaded (GIL=0) and multi-stream: one stream and workspace each."""
+    if lib.nf12_hip_wmma_supported(64) == 0:
+        pytest.skip("wmma path not available")
+    torch.manual_seed(9)
+    n, k, m = 1024, 4096, 64
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    xs = [(torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda() for _ in range(4)]
+    packed, escapes, exp_base = _encode(lib, w)
+    refs = [_linear(lib, x, packed, escapes, exp_base) for x in xs]
+
+    got: list[torch.Tensor | None] = [None] * len(xs)
+
+    def run(i: int) -> None:
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            got[i] = _linear(lib, xs[i], packed, escapes, exp_base)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(len(xs))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    torch.cuda.synchronize()
+    for i in range(len(xs)):
+        assert got[i] is not None
+        assert torch.equal(got[i], refs[i])
 
 
 @pytest.mark.parametrize("m", [16, 32, 64, 128])
