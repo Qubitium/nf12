@@ -54,6 +54,7 @@ extern "C" size_t nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k, int
 
 #include <hip/hip_runtime_api.h>
 
+#include <atomic>
 #include <cstdint>
 
 namespace nf12_hip {
@@ -89,6 +90,10 @@ constexpr int kLdPadded = kSuperAtomCols + 8;
 
 // CTAs resident on all 32 CUs at one per CU: one wave on this part.
 constexpr int64_t kCtasPerWave = 32;
+
+// Slots for the per-device capability cache in `wmma_available`. A host with
+// more devices than this simply re-probes, which is correct, only slower.
+constexpr int kMaxDevices = 64;
 
 // Row mapping for the routed (mixture-of-experts) launch. A dense launch passes
 // an all-null route and the kernel addresses `x`/`out` directly; a routed launch
@@ -434,15 +439,29 @@ static int wmma_arch_ok(int device) {
           arch[4] == '2' && arch[5] == '0' && (arch[6] == '0' || arch[6] == '1'));
 }
 
-// True when the current device has wmma-128b-insts. Cached for the process:
-// the arch of a device never changes, and the routed MoE route is hot enough
-// that a per-launch runtime query would show up.
+// True when the CURRENT device has wmma-128b-insts.
+//
+// Cached per device, not per process. The arch of a given device never changes,
+// so caching is safe, but a single process can see a mix of gfx1201 and gfx1250
+// (two cards, or a container that maps a subset). A process-wide bool captured
+// from whichever device happened to be current on the first call would then
+// send the other device down a matrix-core route it cannot run -- the same
+// class of bug as a shared scratch buffer, just in the capability check.
+//
+// Cached because hipGetDeviceProperties is not free and this sits on the launch
+// path of the hottest kernels. 0 = not yet probed, 1 = yes, -1 = no; two
+// threads racing on the same slot compute the same answer and store it twice,
+// which is harmless.
 static bool wmma_available() {
-  static const bool ok = []() {
-    int device = 0;
-    return hipGetDevice(&device) == hipSuccess && wmma_arch_ok(device) != 0;
-  }();
-  return ok;
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess || device < 0 || device >= kMaxDevices) return false;
+  static std::atomic<int8_t> state[kMaxDevices];
+  int8_t ok = state[device].load(std::memory_order_acquire);
+  if (ok == 0) {
+    ok = wmma_arch_ok(device) ? 1 : -1;
+    state[device].store(ok, std::memory_order_release);
+  }
+  return ok > 0;
 }
 
 // Split count for a given problem. A split reads a DISJOINT k slice, so the
