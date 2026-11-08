@@ -45,12 +45,21 @@ hipError_t nf12_hip_decode(const uint8_t* packed, const uint4* escapes, uint32_t
                            int64_t n, int64_t k, void* out_bf16, int64_t ldo,
                            hipStream_t stream);
 
+/* Uncompressed bf16t twin (SPEC.md 4.4): inverse of nf12.pack_bf16t. */
+hipError_t nf12_hip_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* out_bf16,
+                                 int64_t ldo, hipStream_t stream);
+
 /* Fused decode+GEMM for m <= 16. Never materialises the dense weight. */
 int nf12_hip_linear_fused_small_m_supported(int64_t m);
 hipError_t nf12_hip_linear_fused(const uint8_t* packed, const uint4* escapes,
                                  uint32_t exp_base, const void* x, void* out,
                                  int64_t n, int64_t k, int64_t m, const void* bias,
                                  hipStream_t stream);
+
+/* bf16t twin of the small-M route: same kernel, uncompressed source. */
+hipError_t nf12_hip_linear_fused_bf16t(const uint8_t* packed, const void* x, void* out,
+                                       int64_t n, int64_t k, int64_t m, const void* bias,
+                                       hipStream_t stream);
 
 /* Matrix-core fused path for 17 <= m <= nf12_hip_wmma_max_m(). Returns 0 from
  * nf12_hip_wmma_supported on devices without wmma-128b-insts (gfx1250), where
@@ -68,6 +77,49 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes,
                                 int64_t n, int64_t k, int64_t m, const void* bias,
                                 void* workspace, size_t workspace_bytes,
                                 hipStream_t stream);
+
+/* bf16t twin of the matrix-core route. Takes any m >= 16 and needs no
+ * workspace (the twin runs one K pass). */
+hipError_t nf12_hip_linear_wmma_bf16t(const uint8_t* packed, const void* x, void* out,
+                                      int64_t n, int64_t k, int64_t m, const void* bias,
+                                      void* workspace, size_t workspace_bytes,
+                                      hipStream_t stream);
+
+/* Mixture-of-experts routes (SPEC.md section 9). All are host-synchronisation
+ * free: per-expert counts stay device-side and the host only supplies bounds,
+ * so they capture into a graph. */
+size_t nf12_hip_moe_align_workspace_bytes(int64_t num_assignments, int64_t num_experts);
+hipError_t nf12_hip_moe_align(const int32_t* topk_ids, int64_t num_tokens, int64_t topk,
+                              int64_t num_experts, int32_t* sorted_out,
+                              int64_t* expert_offsets_out, void* workspace,
+                              size_t workspace_bytes, hipStream_t stream);
+hipError_t nf12_hip_moe_linear(const uint8_t* packed, const uint4* escapes,
+                               const int64_t* escape_offsets, const uint8_t* exp_base,
+                               int32_t num_experts, const void* x, int64_t ldx,
+                               const int32_t* gather, int64_t gather_div,
+                               const int32_t* scatter, const int64_t* expert_offsets,
+                               int64_t max_assignments, const float* row_scale, void* out,
+                               int64_t ldy, int64_t n, int64_t k, hipStream_t stream);
+hipError_t nf12_hip_moe_linear_bf16t(const uint8_t* packed, int32_t num_experts, const void* x,
+                                     int64_t ldx, const int32_t* gather, int64_t gather_div,
+                                     const int32_t* scatter, const int64_t* expert_offsets,
+                                     int64_t max_assignments, const float* row_scale, void* out,
+                                     int64_t ldy, int64_t n, int64_t k, hipStream_t stream);
+hipError_t nf12_hip_moe_combine(const void* y_bf16, int64_t ldy, int64_t num_tokens, int64_t topk,
+                                int64_t n, void* out_bf16, int64_t ldo, hipStream_t stream);
+hipError_t nf12_hip_moe_silu_mul(const void* h_bf16, int64_t ldh, int64_t rows, int64_t inter,
+                                 void* out_bf16, int64_t ldo, hipStream_t stream);
+hipError_t nf12_hip_moe_decode(const uint8_t* packed, const uint4* escapes,
+                               const int64_t* escape_offsets, const uint8_t* exp_base,
+                               int32_t num_experts, int64_t n, int64_t k,
+                               const int64_t* expert_offsets, int64_t max_assignments,
+                               int64_t row0, int64_t rows, void* out, int64_t ldo,
+                               hipStream_t stream);
+hipError_t nf12_hip_moe_grouped_operands(const void* x_bf16, int64_t ldx,
+                                         const int32_t* gather, int64_t gather_div,
+                                         const int64_t* expert_offsets, int64_t max_assignments,
+                                         int64_t num_experts, int64_t k, void* x_out_bf16,
+                                         int64_t ldo, int32_t* group_ends, hipStream_t stream);
 
 /* Launches a kernel that stamps 0x4E463132. Fails loudly if the build produced
  * no device code for this target. */

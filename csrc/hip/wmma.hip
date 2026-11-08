@@ -46,6 +46,8 @@
 // ---------------------------------------------------------------------------
 #include "format_hip.cuh"
 
+#include "nf12/nf12_hip.h"
+
 #include <hip/hip_runtime_api.h>
 
 #include <cstdint>
@@ -84,18 +86,45 @@ constexpr int kLdPadded = kSuperAtomCols + 8;
 // CTAs resident on all 32 CUs at one per CU: one wave on this part.
 constexpr int64_t kCtasPerWave = 32;
 
+// Row mapping for the routed (mixture-of-experts) launch. A dense launch passes
+// an all-null route and the kernel addresses `x`/`out` directly; a routed launch
+// reads the expert's gathered input rows and scatters to the output rows, so
+// MoE reuses this whole kernel instead of growing a second GEMM.
+//
+// `row_base` is the expert's first position in the assignment arrays, so the
+// kernel's own row indices stay LOCAL to the expert (0 .. rows-1).
+struct WmmaRoute {
+  const int32_t* gather;
+  const int32_t* scatter;
+  const float* row_scale;
+  const int64_t* expert_offsets;
+  const int64_t* escape_offsets;
+  const uint8_t* exp_base;
+  int64_t gather_div;
+  int64_t max_assignments;
+  int64_t ldx;
+  int64_t ldy;
+  // uint4s per expert of the packed weight, so the routed kernel can step to
+  // expert `e`'s slice without the launcher touching device memory.
+  int64_t weight_expert_vecs;
+  int32_t num_experts;
+  int64_t row_base;
+};
+
 // kMt is the number of 16-token tiles this instantiation covers.
-template <int kMt, int kSplits, bool kDbl, bool kPad>
+template <WeightSource S, bool kRouted, int kMt, int kSplits, bool kDbl, bool kPad>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     wmma_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
                 const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n, int64_t k,
-                int64_t m, __hip_bfloat16* __restrict__ out, const __hip_bfloat16* __restrict__ bias,
-                float* __restrict__ partial) {
+                int64_t m_rows, __hip_bfloat16* __restrict__ out,
+                const __hip_bfloat16* __restrict__ bias, float* __restrict__ partial,
+                WmmaRoute route_in) {
+  static_assert(!kRouted || kSplits == 1, "a routed MoE tile never splits K");
 #if !NF12_AD_HAS_WMMA
   // gfx1250 has no wmma-128b-insts. The body still has to exist so the host
   // and device passes agree on the symbol; the dispatcher never selects it.
-  (void)x; (void)packed; (void)escapes; (void)base_x4; (void)n; (void)k; (void)m;
-  (void)out; (void)bias; (void)partial;
+  (void)x; (void)packed; (void)escapes; (void)base_x4; (void)n; (void)k; (void)m_rows;
+  (void)out; (void)bias; (void)partial; (void)route_in;
   if (blockIdx.x == 0xffffffffu && threadIdx.x == 0xffffffffu) out[0] = __float2bfloat16(0.f);
 #else
   constexpr int kLd = kPad ? kLdPadded : kSuperAtomCols;
@@ -106,9 +135,61 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
   // This CTA owns tokens [m0, m0 + kMt*16). kMt is chosen from M so one block
   // covers the caller's whole M and the packed weight is read exactly once.
-  const int64_t m0 = int64_t(blockIdx.y) * (kMt * 16);
+  //
+  // Routed: blockIdx.y indexes the flattened (expert, 16-row tile) space. The
+  // tile count is device-side (per-expert counts are device-only), so a CTA
+  // scans the offsets and exits when it is past the last expert. CTAs beyond the
+  // scanned count are free: they return before touching memory.
+  int64_t m = m_rows;
+  int64_t m0 = int64_t(blockIdx.y) * (kMt * 16);
+  WmmaRoute route = route_in;
+  if constexpr (kRouted) {
+    int64_t rem = int64_t(blockIdx.y);
+    int64_t start = 0, rows = 0;
+    int32_t e = 0;
+    for (; e < route.num_experts; ++e) {
+      const int64_t lo = min(route.expert_offsets[e], route.max_assignments);
+      const int64_t hi = min(route.expert_offsets[e + 1], route.max_assignments);
+      const int64_t cnt = hi > lo ? hi - lo : 0;
+      const int64_t tiles = (cnt + 15) / 16;
+      if (rem < tiles) {
+        start = lo;
+        rows = cnt;
+        break;
+      }
+      rem -= tiles;
+    }
+    if (e == route.num_experts) return;
+    m0 = rem * 16;
+    m = rows;
+    route.row_base = start;
+    // Each expert carries its own exponent base, escape slice and packed bytes,
+    // so all three are resolved here rather than by the launcher.
+    packed += int64_t(e) * route.weight_expert_vecs;
+    base_x4 = exp_base_x4(route.exp_base[e]);
+    if (escapes != nullptr) escapes = escapes + route.escape_offsets[e];
+  }
   const int64_t m_local = min(int64_t(kMt * 16), m - m0);
   if (m_local <= 0) return;
+
+  // A fragment for k-chunk `j` of token tile `tr`. Dense tiles are 16
+  // contiguous rows, so one `wmma_row_frag` serves them. A routed tile's rows
+  // are gathered, i.e. NOT contiguous, so each lane resolves its own input row
+  // and then reads its 8-bf16 half of the chunk. `wmma_row_frag` is exactly
+  // `base + (lane & 15) * ld + 8 * (lane >> 4)`, so only the row differs.
+  auto load_a = [&](int64_t kb, int64_t j, int64_t tr) {
+    if constexpr (kRouted) {
+      // A tail tile with fewer than 16 rows reads past the expert; clamp into
+      // the assignment array and let the epilogue drop those rows.
+      int64_t pos = route.row_base + tr + (lane & 15);
+      if (pos >= route.max_assignments) pos = route.max_assignments - 1;
+      const int64_t in = route.gather ? int64_t(route.gather[pos]) / route.gather_div : pos;
+      return *reinterpret_cast<const WmmaA*>(x + in * route.ldx + kb * kSuperAtomCols +
+                                             16 * j + 8 * (lane >> 4));
+    } else {
+      return wmma_row_frag(x + tr * k + kb * kSuperAtomCols + 16 * j, k, lane);
+    }
+  };
 
   const int64_t k_blocks = k / kSuperAtomCols;
 
@@ -164,21 +245,16 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   __hip_bfloat16* const sh0 = &tile[0][warp][0];
   __hip_bfloat16* const sh1 = &tile[kDbl ? 1 : 0][warp][0];
 
-  // Load one super-atom's three packed planes for this lane.
-  auto load_planes = [&](int64_t kb, uint4 (&planes)[3]) {
+  // Load one super-atom's planes for this lane (3 packed, or 4 for bf16t).
+  auto load_planes = [&](int64_t kb, uint4 (&planes)[SourceTraits<S>::kLoads]) {
     const int64_t sa = (n0 / kSuperAtomRows) * k_blocks + kb;
-    const uint4* src = packed + sa * kSuperAtomVecs + lane;
-#pragma unroll
-    for (int p = 0; p < 3; ++p) planes[p] = src[p * kPlaneVecs];
+    load_source_planes<S>(packed, sa, lane, planes);
   };
 
-  // Decode 48 bytes of planes into the row-major 16x64 shared tile.
-  auto decode_into = [&](const uint4 (&planes)[3], __hip_bfloat16* dst) {
+  // Decode the planes into the row-major 16x64 shared tile.
+  auto decode_into = [&](const uint4 (&planes)[SourceTraits<S>::kLoads], __hip_bfloat16* dst) {
     AtomRegs r;
-    decode_group(Group{planes[0].x, planes[1].x, planes[1].y}, base_x4, escapes, r[0]);
-    decode_group(Group{planes[0].y, planes[1].z, planes[1].w}, base_x4, escapes, r[1]);
-    decode_group(Group{planes[0].z, planes[2].x, planes[2].y}, base_x4, escapes, r[2]);
-    decode_group(Group{planes[0].w, planes[2].z, planes[2].w}, base_x4, escapes, r[3]);
+    source_planes_to_atoms<S>(planes, base_x4, escapes, r);
 
     RowTile xr;
     atoms_to_tile(r, xr);
@@ -225,7 +301,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         // `wmma_row_frag` supplies the tile's own row ((lane & 15)) itself, so
         // the base passed here is the tile origin only. Adding the lane row
         // here as well applied it twice and produced garbage for every m > 16.
-        const WmmaA a = wmma_row_frag(x + tr * k + kb * kSuperAtomCols + 16 * j, k, lane);
+        const WmmaA a = load_a(kb, j, tr);
         acc[t] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, acc[t]);
       }
     }
@@ -234,7 +310,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // Prefetch the next super-atom's packed bytes into registers before the
   // current one is consumed, so the three plane loads overlap the decode and
   // the matrix-core work.
-  uint4 planes[3], next[3];
+  uint4 planes[SourceTraits<S>::kLoads], next[SourceTraits<S>::kLoads];
   const bool have_planes = kb_lo < kb_hi;
 
   if (kDbl) {
@@ -275,7 +351,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       __syncwarp();
       if (kb + 1 < kb_hi) {
 #pragma unroll
-        for (int p = 0; p < 3; ++p) planes[p] = next[p];
+        for (int p = 0; p < SourceTraits<S>::kLoads; ++p) planes[p] = next[p];
       }
     }
   }
@@ -306,8 +382,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       // With split-K each split writes its own FP32 partial plane and the
       // reduce kernel sums them, so bias must be added exactly once across
       // the splits (adding it in every split multiplied it by kSplits).
-      const float v = acc[t][i] + ((kSplits == 1 || blockIdx.z == 0) ? bias_v : 0.0f);
-      if (kSplits == 1) {
+      float v = acc[t][i] + ((kSplits == 1 || blockIdx.z == 0) ? bias_v : 0.0f);
+      if constexpr (kRouted) {
+        // Scatter to the assignment's output row and apply the router weight in
+        // FP32 before the single BF16 rounding (SPEC.md 9.2).
+        const int64_t pos = route.row_base + row;
+        const int64_t o = route.scatter ? int64_t(route.scatter[pos]) : pos;
+        if (route.row_scale != nullptr) v *= route.row_scale[o];
+        out[o * route.ldy + col] = __float2bfloat16(v);
+      } else if (kSplits == 1) {
         out[row * n + col] = __float2bfloat16(v);
       } else {
         part[row * n + col] = v;
@@ -335,15 +418,6 @@ __global__ void wmma_reduce_kernel(const float* __restrict__ partial, __hip_bflo
 
 using namespace nf12_hip;
 
-extern "C" {
-
-// Largest M this route takes. Each grid.y block decodes the weight for its own
-// M slice, so above the crossover the extra packed reads lose to
-// decode-then-rocBLAS, which decodes once and runs a full GEMM. 128 tokens is
-// the measured crossover on gfx1201 (see the README table); beyond it the
-// dispatcher keeps the rocBLAS route.
-int nf12_hip_wmma_max_m() { return 2 * kMaxTokens; }
-
 // `__gfx1201__` is defined only while compiling DEVICE code, so a host function
 // cannot use it: guarding on it silently reports "unsupported" and the route is
 // never taken. Ask the runtime instead. gfx1250 has no wmma-128b-insts, so it
@@ -356,24 +430,16 @@ static int wmma_arch_ok(int device) {
           arch[4] == '2' && arch[5] == '0' && (arch[6] == '0' || arch[6] == '1'));
 }
 
-int nf12_hip_wmma_supported(int64_t m) {
-  if (m < 16 || m > 2 * kMaxTokens) return 0;
-  int device = 0;
-  if (hipGetDevice(&device) != hipSuccess) return 0;
-  return wmma_arch_ok(device);
+// True when the current device has wmma-128b-insts. Cached for the process:
+// the arch of a device never changes, and the routed MoE route is hot enough
+// that a per-launch runtime query would show up.
+static bool wmma_available() {
+  static const bool ok = []() {
+    int device = 0;
+    return hipGetDevice(&device) == hipSuccess && wmma_arch_ok(device) != 0;
+  }();
+  return ok;
 }
-
-// There is deliberately NO process-wide split-K scratch here. A static pointer
-// is not per device, and even a per-device one would be shared by concurrent
-// streams: two launches would write the same FP32 partial planes and the reduce
-// pass would mix them, silently corrupting both results. The caller owns the
-// scratch instead (``nf12_hip_linear_wmma_workspace_bytes``), so this file holds
-// no mutable state and concurrent streams are independent.
-//
-// Do not "optimise" this back into a hipMalloc per call either: hipMalloc and
-// hipFree synchronise the device, and doing them around every launch measured
-// +110 us at m=32 (147 us instead of 38 us), which erased the whole split-K win.
-// A caller-side caching allocator (PyTorch's, for example) avoids both problems.
 
 // Split count for a given problem. A split reads a DISJOINT k slice, so the
 // packed weight is never read twice; the cost is the per-split FP32 partial
@@ -467,12 +533,6 @@ static WmmaPlan wmma_plan(int64_t n, int64_t k, int64_t m) {
   return plan;
 }
 
-size_t nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
-  const WmmaPlan plan = wmma_plan(n, k, m);
-  if (plan.splits <= 1 || m <= 0 || n <= 0) return 0;
-  return size_t(plan.splits) * size_t(m) * size_t(n) * sizeof(float);
-}
-
 // `out` is [m, n] row-major BF16; `x` is [m, k].
 //
 // Tiles per CTA are chosen so the CTA covers the caller's M with as few
@@ -481,21 +541,41 @@ size_t nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
 // matrix-core work (and shared-memory traffic) that the tail tiles would have
 // thrown away. Every tile count in [1, kMaxTiles] is instantiated so the choice
 // stays a compile-time bound inside the kernel.
-hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                              const void* x, void* out, int64_t n, int64_t k, int64_t m,
-                              const void* bias, void* workspace, size_t workspace_bytes,
-                              hipStream_t stream) {
-  if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
-  if (m < 16 || m > nf12_hip_wmma_max_m()) return hipErrorInvalidValue;
+//
+// The weight source is a template parameter, so the bf16t twin (SPEC.md 4.4)
+// runs this same kernel and is the exactness reference for the nf12 route
+// rather than a second implementation.
+template <WeightSource Src>
+static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
+                                   uint32_t exp_base, const void* x, void* out, int64_t n,
+                                   int64_t k, int64_t m, const void* bias, void* workspace,
+                                   size_t workspace_bytes, hipStream_t stream) {
+  if constexpr (Src == WeightSource::kNf12) {
+    if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
+  }
   if (n % kSuperAtomRows != 0) return hipErrorInvalidValue;
 
-  const WmmaPlan plan = wmma_plan(n, k, m);
-  const int64_t n_blocks = plan.n_blocks;
-  const int tiles = plan.tiles;
-  const int64_t m_blocks = plan.m_blocks;
+  int tiles, splits;
+  int64_t m_blocks;
+  if constexpr (Src == WeightSource::kBf16t) {
+    if (!wmma_available()) return hipErrorNotSupported;
+    // The twin is the exactness reference, not a hot path, so it takes one
+    // fixed configuration instead of the tuned nf12 dispatch: eight 16-token
+    // tiles per CTA, one K pass, no split, any M.
+    if (m < 16) return hipErrorInvalidValue;
+    tiles = kMaxTiles;
+    splits = 1;
+    m_blocks = (m + kMaxTiles * 16 - 1) / (kMaxTiles * 16);
+  } else {
+    if (m < 16 || m > nf12_hip_wmma_max_m()) return hipErrorInvalidValue;
+    const WmmaPlan plan = wmma_plan(n, k, m);
+    tiles = plan.tiles;
+    splits = plan.splits;
+    m_blocks = plan.m_blocks;
+  }
+  const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
   if (n_blocks == 0 || m_blocks == 0) return hipSuccess;
   if (n_blocks > 0x7fffLL || m_blocks > 0x7fffLL) return hipErrorInvalidValue;
-  const int splits = plan.splits;
 
   float* partial = nullptr;
   if (splits > 1) {
@@ -506,61 +586,53 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uin
 
   const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_blocks),
                   static_cast<unsigned>(splits));
+  const WmmaRoute route{};
 
-#define NF12_AD_LAUNCH(T, S, D, P)                                                          \
-  wmma_kernel<T, S, D, P><<<grid, kThreadsPerBlock, 0, stream>>>(                           \
-      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), \
-      escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),    \
-      reinterpret_cast<const __hip_bfloat16*>(bias), partial)
+#define NF12_AD_LAUNCH(SRC, ROUTED, T, SPL, D, P)                                          \
+  wmma_kernel<SRC, ROUTED, T, SPL, D, P><<<grid, kThreadsPerBlock, 0, stream>>>(           \
+      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),  \
+      escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),     \
+      reinterpret_cast<const __hip_bfloat16*>(bias), partial, route)
 
-  // (tile count, split count) pairs the dispatcher can reach. Split 1 needs no
-  // reduce pass; every other case reduces from a partial plane.
+  if constexpr (Src == WeightSource::kBf16t) {
+    const bool pad = n_blocks * m_blocks <= 96;
+    if (pad) {
+      NF12_AD_LAUNCH(WeightSource::kBf16t, false, kMaxTiles, 1, false, true);
+    } else {
+      NF12_AD_LAUNCH(WeightSource::kBf16t, false, kMaxTiles, 1, false, false);
+    }
+  } else {
+    // (tile count, split count) pairs the dispatcher can reach. Split 1 needs
+    // no reduce pass; every other case reduces from a partial plane.
 #define NF12_AD_DISPATCH(T, D, P)               \
   do {                                          \
     if (splits == 1) {                          \
-      NF12_AD_LAUNCH(T, 1, D, P);                  \
+      NF12_AD_LAUNCH(WeightSource::kNf12, false, T, 1, D, P);    \
     } else if (splits == 2) {                   \
-      NF12_AD_LAUNCH(T, 2, D, P);                  \
+      NF12_AD_LAUNCH(WeightSource::kNf12, false, T, 2, D, P);    \
     } else if (splits == 4) {                   \
-      NF12_AD_LAUNCH(T, 4, D, P);                  \
+      NF12_AD_LAUNCH(WeightSource::kNf12, false, T, 4, D, P);    \
     } else {                                    \
-      NF12_AD_LAUNCH(T, 8, D, P);                   \
+      NF12_AD_LAUNCH(WeightSource::kNf12, false, T, 8, D, P);    \
     }                                           \
   } while (0)
 
-  // Double buffering only pays while the extra LDS and VGPRs still leave room
-  // for more than one CTA per CU; above six tiles they do not (m=128 at
-  // N=11008 regressed 184 -> 289 us). Each tile count therefore instantiates
-  // exactly one of the two variants, so the kernel count is unchanged.
-  //
-  // The padded shared stride (36 KiB/CTA instead of 32) costs one resident CTA
-  // per CU. That is free while the whole launch fits under three CTAs per CU
-  // and a loss beyond it, so the launcher picks the variant from the grid size.
-  const bool pad = n_blocks * m_blocks <= 96;
-  // Double buffering is only worth its shared memory where shared memory is the
-  // binding occupancy limit, and that is only true for the smallest tile counts.
-  // A padded CTA is 18 KiB single-buffered and 36 KiB double-buffered against
-  // 128 KiB per CU, so it holds 7 or 3 CTAs. At kMt <= 2 the accumulator is
-  // small enough that the VGPR budget allows well over three CTAs, so the LDS
-  // footprint decides; from kMt = 3 up the ~135 VGPRs already cap the CU at
-  // three CTAs and dropping the buffer buys nothing (25600x5120 m=128 measured
-  // 447 us buffered against 479 us not).
-  //
-  // Where LDS does bind, dropping the buffer only helps in a narrow band: the
-  // launch must be starved enough that one extra resident CTA matters, but not
-  // so starved that the buffer's own latency hiding is the bigger win.
-  // 4096x4096 m=16 is 128 CTAs = four waves against a cap of three, and the
-  // buffer costs 28.4 -> 23.5 us. The wide shapes are 14-28 waves deep, where
-  // the cap does not bite at all and removing the buffer only loses
-  // (4096x28672 m=16 measured 1.14 -> 1.08x). 2048x8192 m=16 is two waves, the
-  // three still fit, and the buffer is worth 30.5 -> 25.9 us.
-  const int64_t ctas = n_blocks * m_blocks * splits;
-  const int lds_kib = pad ? 36 : 32;
-  const int64_t waves = (ctas + kCtasPerWave - 1) / kCtasPerWave;
-  const bool lds_starved = waves > 128 / lds_kib && waves <= 4;
-  const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved);
-  // Only the two smallest tile counts get the runtime buffer choice; from three
-  // tiles up the buffer is unconditional, so those stay single-instantiation.
+    // Double buffering only pays while the extra LDS and VGPRs still leave room
+    // for more than one CTA per CU; above six tiles they do not (m=128 at
+    // N=11008 regressed 184 -> 289 us). Each tile count therefore instantiates
+    // exactly one of the two variants, so the kernel count is unchanged.
+    //
+    // The padded shared stride (36 KiB/CTA instead of 32) costs one resident CTA
+    // per CU. That is free while the whole launch fits under three CTAs per CU
+    // and a loss beyond it, so the launcher picks the variant from the grid size.
+    const bool pad = n_blocks * m_blocks <= 96;
+    const int64_t ctas = n_blocks * m_blocks * splits;
+    const int lds_kib = pad ? 36 : 32;
+    const int64_t waves = (ctas + kCtasPerWave - 1) / kCtasPerWave;
+    const bool lds_starved = waves > 128 / lds_kib && waves <= 4;
+    const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved);
+    // Only the two smallest tile counts get the runtime buffer choice; from
+    // three tiles up the buffer is unconditional, so those stay single.
 #define NF12_AD_TILES(T, D)                                                     \
   do {                                                                          \
     if (pad) {                                                                  \
@@ -577,19 +649,20 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uin
       NF12_AD_TILES(T, false);                                                  \
     }                                                                           \
   } while (0)
-  switch (tiles) {
-    case 1: NF12_AD_TILES_DYN(1); break;
-    case 2: NF12_AD_TILES_DYN(2); break;
-    case 3: NF12_AD_TILES(3, true); break;
-    case 4: NF12_AD_TILES(4, true); break;
-    case 5: NF12_AD_TILES(5, true); break;
-    case 6: NF12_AD_TILES(6, true); break;
-    case 7: NF12_AD_TILES(7, false); break;
-    default: NF12_AD_TILES(kMaxTiles, false); break;
-  }
+    switch (tiles) {
+      case 1: NF12_AD_TILES_DYN(1); break;
+      case 2: NF12_AD_TILES_DYN(2); break;
+      case 3: NF12_AD_TILES(3, true); break;
+      case 4: NF12_AD_TILES(4, true); break;
+      case 5: NF12_AD_TILES(5, true); break;
+      case 6: NF12_AD_TILES(6, true); break;
+      case 7: NF12_AD_TILES(7, false); break;
+      default: NF12_AD_TILES(kMaxTiles, false); break;
+    }
 #undef NF12_AD_TILES_DYN
 #undef NF12_AD_TILES
 #undef NF12_AD_DISPATCH
+  }
 #undef NF12_AD_LAUNCH
 
   hipError_t status = hipGetLastError();
@@ -606,6 +679,131 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uin
     status = hipGetLastError();
   }
   return status;
+}
+
+// Routed (mixture-of-experts) linear. One CTA per (expert, 16-row weight block,
+// 16-assignment tile), so blockIdx.y enumerates the flattened (expert, tile)
+// space. The tile count is device-side because per-expert counts are, so the
+// grid is the worst-case bound and surplus CTAs return before touching memory.
+// `out` rows are ldy apart; `x` rows are ldx apart.
+template <WeightSource Src>
+static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
+                                  const int64_t* escape_offsets, const uint8_t* exp_base,
+                                  int32_t num_experts, const void* x, int64_t ldx,
+                                  const int32_t* gather, int64_t gather_div,
+                                  const int32_t* scatter, const int64_t* expert_offsets,
+                                  int64_t max_assignments, const float* row_scale, void* out,
+                                  int64_t ldy, int64_t n, int64_t k, hipStream_t stream) {
+  if (!wmma_available()) return hipErrorNotSupported;
+  if (n % kSuperAtomRows != 0 || num_experts < 1 || max_assignments <= 0) {
+    return hipErrorInvalidValue;
+  }
+  const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
+  const int64_t m_tiles = (max_assignments + 15) / 16 + num_experts;
+  if (n_blocks == 0) return hipSuccess;
+  if (n_blocks > 0x7fffLL || m_tiles > 0x7fffLL) return hipErrorInvalidValue;
+
+  WmmaRoute route{};
+  route.gather = gather;
+  route.scatter = scatter;
+  route.row_scale = row_scale;
+  route.expert_offsets = expert_offsets;
+  route.escape_offsets = escape_offsets;
+  route.exp_base = exp_base;
+  route.gather_div = gather_div;
+  route.max_assignments = max_assignments;
+  route.ldx = ldx;
+  route.ldy = ldy;
+  route.weight_expert_vecs = (n / kSuperAtomRows) * (k / kSuperAtomCols) *
+                             SourceTraits<Src>::kVecs;
+  route.num_experts = num_experts;
+
+  const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_tiles), 1);
+  // One tile per CTA: the assignment axis is the scarce one in MoE, and a
+  // single tile keeps the VGPR budget low enough for several CTAs per CU.
+  wmma_kernel<Src, true, 1, 1, false, false><<<grid, kThreadsPerBlock, 0, stream>>>(
+      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),
+      escapes, 0u, n, k, 0, reinterpret_cast<__hip_bfloat16*>(out), nullptr, nullptr, route);
+  return hipGetLastError();
+}
+
+extern "C" {
+
+// Largest M this route takes. Each grid.y block decodes the weight for its own
+// M slice, so above the crossover the extra packed reads lose to
+// decode-then-rocBLAS, which decodes once and runs a full GEMM. 128 tokens is
+// the measured crossover on gfx1201 (see the README table); beyond it the
+// dispatcher keeps the rocBLAS route.
+int nf12_hip_wmma_max_m() { return 2 * kMaxTokens; }
+
+
+
+int nf12_hip_wmma_supported(int64_t m) {
+  if (m < 16 || m > 2 * kMaxTokens) return 0;
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess) return 0;
+  return wmma_arch_ok(device);
+}
+
+// There is deliberately NO process-wide split-K scratch here. A static pointer
+// is not per device, and even a per-device one would be shared by concurrent
+// streams: two launches would write the same FP32 partial planes and the reduce
+// pass would mix them, silently corrupting both results. The caller owns the
+// scratch instead (``nf12_hip_linear_wmma_workspace_bytes``), so this file holds
+// no mutable state and concurrent streams are independent.
+//
+// Do not "optimise" this back into a hipMalloc per call either: hipMalloc and
+// hipFree synchronise the device, and doing them around every launch measured
+// +110 us at m=32 (147 us instead of 38 us), which erased the whole split-K win.
+// A caller-side caching allocator (PyTorch's, for example) avoids both problems.
+
+
+
+size_t nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
+  const WmmaPlan plan = wmma_plan(n, k, m);
+  if (plan.splits <= 1 || m <= 0 || n <= 0) return 0;
+  return size_t(plan.splits) * size_t(m) * size_t(n) * sizeof(float);
+}
+
+
+hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                                const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                                const void* bias, void* workspace, size_t workspace_bytes,
+                                hipStream_t stream) {
+  return linear_wmma_impl<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m, bias,
+                                               workspace, workspace_bytes, stream);
+}
+
+// bf16t twin of the matrix-core route (SPEC.md 4.4).
+hipError_t nf12_hip_linear_wmma_bf16t(const uint8_t* packed, const void* x, void* out, int64_t n,
+                                      int64_t k, int64_t m, const void* bias, void* workspace,
+                                      size_t workspace_bytes, hipStream_t stream) {
+  return linear_wmma_impl<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias,
+                                                workspace, workspace_bytes, stream);
+}
+
+// MoE routes. The nf12 form takes a per-expert codec; the bf16t form does not.
+hipError_t nf12_hip_moe_linear(const uint8_t* packed, const uint4* escapes,
+                               const int64_t* escape_offsets, const uint8_t* exp_base,
+                               int32_t num_experts, const void* x, int64_t ldx,
+                               const int32_t* gather, int64_t gather_div, const int32_t* scatter,
+                               const int64_t* expert_offsets, int64_t max_assignments,
+                               const float* row_scale, void* out, int64_t ldy, int64_t n,
+                               int64_t k, hipStream_t stream) {
+  return moe_linear_impl<WeightSource::kNf12>(packed, escapes, escape_offsets, exp_base,
+                                              num_experts, x, ldx, gather, gather_div, scatter,
+                                              expert_offsets, max_assignments, row_scale, out, ldy,
+                                              n, k, stream);
+}
+
+hipError_t nf12_hip_moe_linear_bf16t(const uint8_t* packed, int32_t num_experts, const void* x,
+                                     int64_t ldx, const int32_t* gather, int64_t gather_div,
+                                     const int32_t* scatter, const int64_t* expert_offsets,
+                                     int64_t max_assignments, const float* row_scale, void* out,
+                                     int64_t ldy, int64_t n, int64_t k, hipStream_t stream) {
+  return moe_linear_impl<WeightSource::kBf16t>(packed, nullptr, nullptr, nullptr, num_experts, x,
+                                               ldx, gather, gather_div, scatter, expert_offsets,
+                                               max_assignments, row_scale, out, ldy, n, k, stream);
 }
 
 }  // extern "C"

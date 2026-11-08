@@ -26,9 +26,11 @@ add_library(nf12_hip SHARED
   decode.hip
   encode.hip
   wmma.hip
+  moe.hip
   embedding.hip
   pack_bf16t.hip
-  c_api.hip)
+  c_api.hip
+  c_api_moe.hip)
 target_include_directories(nf12_hip
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

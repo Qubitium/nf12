@@ -5,10 +5,12 @@
 // The torch extension (csrc/torch/ops.cpp) is backend-agnostic: it calls the
 // nf12_* C API from include/nf12/nf12.h. On ROCm those symbols are provided
 // here on top of the HIP kernels, so ops.cpp is reused unchanged instead of
-// being duplicated. Ops the HIP port does not implement yet return
-// NF12_ERROR_UNSUPPORTED; nothing is silently emulated.
+// being duplicated. Every op is backed by a real kernel: nothing is emulated and
+// nothing silently falls back to a reference implementation.
 //
 // Adapted from GPT-QModel (https://github.com/ModelCloud/GPTQModel) by Qubitium.
+
+#include "c_api_common.cuh"
 
 #include "nf12/nf12.h"
 #include "nf12/nf12_hip.h"
@@ -22,28 +24,7 @@ hipError_t embedding(const void* packed, const uint4* escapes, uint32_t num_esca
                      hipStream_t stream);
 }  // namespace nf12_hip
 
-namespace {
-
-thread_local hipError_t t_last_error = hipSuccess;
-
-nf12_status_t status(hipError_t err) {
-  t_last_error = err;
-  switch (err) {
-    case hipSuccess:
-      return NF12_OK;
-    case hipErrorInvalidValue:
-    case hipErrorInvalidDevice:
-      return NF12_ERROR_INVALID_ARGUMENT;
-    case hipErrorNotSupported:
-      return NF12_ERROR_UNSUPPORTED;
-    case hipErrorOutOfMemory:
-      return NF12_ERROR_INSUFFICIENT_WORKSPACE;
-    default:
-      return NF12_ERROR_CUDA;
-  }
-}
-
-}  // namespace
+using nf12_hip_capi::status;
 
 extern "C" {
 
@@ -63,7 +44,7 @@ const char* nf12_status_string(nf12_status_t s) {
   return "unknown";
 }
 
-cudaError_t nf12_last_cuda_error(void) { return t_last_error; }
+cudaError_t nf12_last_cuda_error(void) { return nf12_hip_capi::t_last_error; }
 
 size_t nf12_packed_bytes(int64_t n, int64_t k) {
   return static_cast<size_t>(n) * static_cast<size_t>(k) * 3 / 2;
@@ -136,56 +117,26 @@ nf12_status_t nf12_pack_bf16t(const void* w, int64_t n, int64_t k, int64_t ldw, 
   return status(nf12_hip::pack_bf16t(w, n, k, ldw, static_cast<uint8_t*>(out), stream));
 }
 
-nf12_status_t nf12_linear_bf16t(const void*, int64_t, int64_t, const void*, int64_t, int64_t,
-                                const void*, void*, int64_t, void*, size_t, cudaStream_t) {
-  return NF12_ERROR_UNSUPPORTED;
+nf12_status_t nf12_linear_bf16t(const void* x_bf16, int64_t m, int64_t ldx, const void* w_bf16t,
+                                int64_t n, int64_t k, const void* bias_bf16, void* y_bf16,
+                                int64_t ldy, void* workspace, size_t workspace_bytes,
+                                cudaStream_t stream) {
+  if (n <= 0 || k <= 0 || n % 16 != 0 || k % 64 != 0) return NF12_ERROR_INVALID_ARGUMENT;
+  if (w_bf16t == nullptr || x_bf16 == nullptr || y_bf16 == nullptr) {
+    return NF12_ERROR_INVALID_ARGUMENT;
+  }
+  if (ldx != k || ldy != n) return NF12_ERROR_INVALID_ARGUMENT;
+  const uint8_t* const packed = static_cast<const uint8_t*>(w_bf16t);
+  if (m < 16) {
+    return status(
+        nf12_hip_linear_fused_bf16t(packed, x_bf16, y_bf16, n, k, m, bias_bf16, stream));
+  }
+  return status(nf12_hip_linear_wmma_bf16t(packed, x_bf16, y_bf16, n, k, m, bias_bf16,
+                                           workspace, workspace_bytes, stream));
 }
 
-size_t nf12_moe_align_workspace_bytes(int64_t, int64_t, int64_t) { return 0; }
-
-nf12_status_t nf12_moe_align(const int32_t*, int64_t, int64_t, int64_t, int32_t*, int64_t*, void*,
-                             size_t, cudaStream_t) {
-  return NF12_ERROR_UNSUPPORTED;
-}
-
-size_t nf12_moe_linear_workspace_bytes(int64_t, int64_t, int64_t, int64_t, int) { return 0; }
-
-nf12_status_t nf12_moe_linear(const void*, int64_t, const int32_t*, int64_t, const int32_t*,
-                              const int64_t*, int64_t, const nf12_moe_weight_t*, const float*, void*,
-                              int64_t, void*, size_t, cudaStream_t) {
-  return NF12_ERROR_UNSUPPORTED;
-}
-
-nf12_status_t nf12_moe_linear_bf16t(const void*, int64_t, const int32_t*, int64_t, const int32_t*,
-                                    const int64_t*, int64_t, const void*, int64_t, int64_t,
-                                    int64_t, const float*, void*, int64_t, void*, size_t,
-                                    cudaStream_t) {
-  return NF12_ERROR_UNSUPPORTED;
-}
-
-
-nf12_status_t nf12_moe_combine(const void*, int64_t, int64_t, int64_t, int64_t, void*, int64_t,
-                               cudaStream_t) {
-  return NF12_ERROR_UNSUPPORTED;
-}
-
-nf12_status_t nf12_moe_silu_mul(const void*, int64_t, int64_t, int64_t, void*, int64_t,
-                                cudaStream_t) {
-  return NF12_ERROR_UNSUPPORTED;
-}
-
-nf12_status_t nf12_moe_decode(const nf12_moe_weight_t*, const int64_t*, int64_t, int64_t, int64_t,
-                              void*, int64_t, cudaStream_t) {
-  return NF12_ERROR_UNSUPPORTED;
-}
-
-int64_t nf12_moe_linear_decode_gemm_rows(int64_t, int64_t, int64_t, int64_t, int) { return 0; }
-
-nf12_status_t nf12_moe_grouped_operands(const void*, int64_t, const int32_t*, int64_t,
-                                        const int64_t*, int64_t, int64_t, int64_t, void*,
-                                        int64_t, int32_t*, cudaStream_t) {
-  return NF12_ERROR_UNSUPPORTED;
-}
+// The MoE C API lives in c_api_moe.hip: it is the same contract, but keeping it
+// in its own translation unit stops this file from becoming a second dispatcher.
 
 nf12_status_t nf12_embedding(const nf12_weight_t* w, const int32_t* ids, int64_t num_ids,
                              void* out_bf16, int64_t ldo, cudaStream_t stream) {

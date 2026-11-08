@@ -248,6 +248,69 @@ __device__ __forceinline__ void atoms_to_tile(const AtomRegs& r, RowTile& x) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Weight source
+// ---------------------------------------------------------------------------
+// The GEMM kernels are written once and parameterised on where the BF16
+// super-atom comes from, mirroring `WeightTraits` in csrc/linear/common.cuh:
+//
+//   * kNf12  - 1536-byte packed super-atom (3 planes); decode reconstructs the
+//              atom registers.
+//   * kBf16t - 2048-byte uncompressed twin (SPEC.md 4.4, `pack_bf16t`); one
+//              plane per atom already IS the atom register, so the "decode" is
+//              a load. Used for exactness comparisons.
+//
+// Both yield the same AtomRegs for the same weights, so the two sources produce
+// matching outputs through one code path instead of two kernels.
+enum class WeightSource { kNf12, kBf16t };
+
+template <WeightSource S>
+struct SourceTraits;
+
+template <>
+struct SourceTraits<WeightSource::kNf12> {
+  static constexpr int kLoads = 3;
+  static constexpr int kVecs = kSuperAtomVecs;
+};
+
+template <>
+struct SourceTraits<WeightSource::kBf16t> {
+  static constexpr int kLoads = 4;
+  static constexpr int kVecs = kSuperAtomVecsBf16t;
+};
+
+// One lane's 16-byte chunks of super-atom `sa`.
+template <WeightSource S>
+__device__ __forceinline__ void load_source_planes(const uint4* __restrict__ packed, int64_t sa,
+                                                   int lane,
+                                                   uint4 (&p)[SourceTraits<S>::kLoads]) {
+  const uint4* src = packed + sa * SourceTraits<S>::kVecs + lane;
+#pragma unroll
+  for (int i = 0; i < SourceTraits<S>::kLoads; ++i) p[i] = src[i * kPlaneVecs];
+}
+
+// Decode (kNf12) or reinterpret (kBf16t) the lane's planes as atom registers.
+// kNf12 requires the whole wave to reach this call (the escape test is a vote).
+template <WeightSource S>
+__device__ __forceinline__ void source_planes_to_atoms(
+    const uint4 (&p)[SourceTraits<S>::kLoads], uint32_t base_x4,
+    const uint4* __restrict__ escapes, AtomRegs& r) {
+  if constexpr (S == WeightSource::kNf12) {
+    decode_group(Group{p[0].x, p[1].x, p[1].y}, base_x4, escapes, r[0]);
+    decode_group(Group{p[0].y, p[1].z, p[1].w}, base_x4, escapes, r[1]);
+    decode_group(Group{p[0].z, p[2].x, p[2].y}, base_x4, escapes, r[2]);
+    decode_group(Group{p[0].w, p[2].z, p[2].w}, base_x4, escapes, r[3]);
+  } else {
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      r[j][0] = p[j].x;
+      r[j][1] = p[j].y;
+      r[j][2] = p[j].z;
+      r[j][3] = p[j].w;
+    }
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // Encode (SPEC.md 2, "Reference encode")
