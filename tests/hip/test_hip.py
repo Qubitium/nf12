@@ -135,7 +135,10 @@ def _linear(lib, x, packed, escapes, exp_base, bias=None):
 def _violations(got, ref) -> int:
     err = (got.double() - ref).abs()
     tol = 2e-3 + 2e-3 * ref.abs()
-    return int((err > tol).sum())
+    # A NaN in `got` compares False against every tolerance, so a naive
+    # `err > tol` would report a clean pass. Non-finite outputs are violations.
+    bad = (err > tol) | ~torch.isfinite(got)
+    return int(bad.sum())
 
 
 def test_selftest(lib):
