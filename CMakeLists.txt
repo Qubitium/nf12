@@ -41,7 +41,10 @@ endif()
 install(FILES CMakeLists.txt DESTINATION nf12/_src)
 install(DIRECTORY csrc include DESTINATION nf12/_src
   FILES_MATCHING PATTERN "*.cu" PATTERN "*.cpp" PATTERN "*.cuh"
-  PATTERN "*.h" PATTERN "*.map" PATTERN "*.hip")
+  PATTERN "*.h" PATTERN "*.map" PATTERN "*.hip"
+  # The HIP subtree has its own CMakeLists.txt. Without this the wheel ships
+  # csrc/hip/*.hip but no build file, so the ROCm JIT cannot configure it.
+  PATTERN "CMakeLists.txt")
 if(NOT NF12_BUILD_NATIVE)
   return()
 endif()
