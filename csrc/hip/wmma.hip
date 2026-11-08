@@ -1,6 +1,7 @@
-// SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 // SPDX-License-Identifier: Apache-2.0
+//
+// Adapted from GPT-QModel (https://github.com/ModelCloud/GPTQModel) by Qubitium.
 // ---------------------------------------------------------------------------
 // NF12-AD (NyoomFloat12) fused decode+GEMM using RDNA4 matrix cores.
 //
@@ -389,8 +390,25 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uin
 
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
 
-  const int tiles = static_cast<int>((m + 15) / 16);
-  const int64_t m_blocks = (m + kMaxTokens - 1) / kMaxTokens;
+  const int full_tiles = static_cast<int>((m + 15) / 16);
+  // At kMt=8 the 8x8 FP32 accumulator costs 64 VGPRs and the kernel lands at
+  // 167 VGPRs / 9 waves per SIMD. When K is long enough that a second packed
+  // read is cheap relative to the matrix-core work, and the launch is short of
+  // CTAs, halve the tile count and split M across CTAs. Measured on gfx1201:
+  // 8192x8192 m=128 0.68 -> 0.88x and 14336x4096 0.79 -> 0.83x, while the
+  // short-K and wide-N shapes stay on the 8-tile kernel and do not regress.
+  // Above m=128 there are already 2 M-blocks, so the launch is not starved and
+  // splitting further only re-reads the packed weight (measured neutral at
+  // m=256, 2 reads vs 4); keep the 8-tile kernel there.
+  const int64_t k_blocks = k / kSuperAtomCols;
+  const bool split_m = full_tiles > 4 && full_tiles <= 8 && k_blocks >= 128 && n_blocks <= 64;
+  const int tiles = split_m ? 4 : full_tiles;
+  // The dispatcher clamps anything above kMaxTiles to the kMaxTiles kernel, so
+  // the tokens one CTA actually covers is min(tiles, kMaxTiles)*16. Deriving
+  // m_blocks from the UNCLAMPED tile count dropped the second M block at
+  // m=256 (tiles=16 -> m_blocks=1, but only 8 tiles are launched).
+  const int64_t launch_tiles = (tiles < kMaxTiles) ? tiles : kMaxTiles;
+  const int64_t m_blocks = (m + launch_tiles * 16 - 1) / (launch_tiles * 16);
   if (n_blocks == 0 || m_blocks == 0) return hipSuccess;
   if (n_blocks > 0x7fffLL || m_blocks > 0x7fffLL) return hipErrorInvalidValue;
   const int splits = pick_splits(n_blocks * m_blocks, m);
