@@ -90,7 +90,7 @@ def main() -> None:
         m, k = x.shape
         n = packed.shape[0]
         out = torch.empty((m, n), dtype=torch.bfloat16, device=dev)
-        if m <= 16 and lib.nf12_hip_linear_fused_small_m_supported(m):
+        if m < 16 and lib.nf12_hip_linear_fused_small_m_supported(m):
             rc = lib.nf12_hip_linear_fused(packed.data_ptr(), escapes.data_ptr(), eb,
                                            x.data_ptr(), out.data_ptr(), n, k, m, None, stream)
         elif m <= max_m and lib.nf12_hip_wmma_supported(m):

@@ -73,19 +73,22 @@ caches the result per source hash. `NF12_ENABLE_HIP` is additive and changes no
 CUDA target, and a host without a CUDA compiler now skips the CUDA targets
 instead of failing configuration.
 
-Route selection by token count matches the CUDA side: `m <= 16` uses the fused
-small-M kernel, `17 <= m <= 128` the matrix-core path, and larger `m` should fall
-back to decode-then-rocBLAS. `gfx1250` has no `wmma-128b-insts`, so the
-matrix-core path compiles out there and the caller keeps the non-wmma route.
+Route selection by token count matches the CUDA side: `m <= 15` uses the fused
+small-M kernel, `16 <= m <= 256` the matrix-core path, and larger `m` falls back
+to decode-then-rocBLAS. `m=16` is a single matrix-core tile and is faster than
+the fused kernel on every measured shape. `gfx1250` has no `wmma-128b-insts`,
+so the matrix-core path compiles out there and the caller keeps the non-wmma
+route.
 
 Correctness and performance on the R9700: decode is bit-exact, encode is
 byte-identical to the reference codec, and fused linear has 0 violations of
 `|err| <= 2e-3 + 2e-3*|ref|` over 21 shapes (`rms_rel ~1.66e-3`, the FP64
-oracle's own BF16 rounding floor). Against a dense BF16 GEMM the HIP kernel is
-1.30-1.44x faster at `11008x4096` for `m = 17..96`, running at ~640 GB/s against
-a measured 633 GB/s HBM read ceiling, and slower at `4096^2`, where the BF16
-weight fits the 64 MiB Infinity Cache. Full tables and porting notes are in
-[`csrc/hip/README.md`](csrc/hip/README.md).
+oracle's own BF16 rounding floor). Against a dense BF16 GEMM, on the same
+`k x n` grid as the CUDA benchmarks (`bench/common.py`), the HIP kernel is
+1.09-1.30x faster at `m=8..64` for the large 14336/25600/57344-wide weights and
+1.20-1.28x at `m=16`, while the small weights (`4096x4096`, `2048x8192`,
+`896x4864`) stay slower because their BF16 weight is L2/L3-resident. Full
+tables and porting notes are in [`csrc/hip/README.md`](csrc/hip/README.md).
 
 ## Python
 

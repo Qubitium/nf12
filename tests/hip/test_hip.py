@@ -117,7 +117,7 @@ def _linear(lib, x, packed, escapes, exp_base):
     m, k = x.shape
     n = packed.shape[0]
     out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
-    if m <= 16:
+    if m < 16:
         rc = lib.nf12_hip_linear_fused(
             packed.data_ptr(), escapes.data_ptr(), exp_base, x.data_ptr(),
             out.data_ptr(), n, k, m, None, _stream(),
@@ -176,7 +176,7 @@ def test_decode_is_bit_exact(lib):
 
 
 @pytest.mark.parametrize("n,k", [(256, 256), (1024, 4096)])
-@pytest.mark.parametrize("m", [1, 4, 16])
+@pytest.mark.parametrize("m", [1, 4, 15])
 def test_fused_linear_matches_fp64_oracle(lib, n, k, m):
     torch.manual_seed(m)
     w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
@@ -186,7 +186,7 @@ def test_fused_linear_matches_fp64_oracle(lib, n, k, m):
     assert _violations(_linear(lib, x, packed, escapes, exp_base), ref) == 0
 
 
-@pytest.mark.parametrize("m", [17, 32, 64, 128])
+@pytest.mark.parametrize("m", [16, 17, 32, 64, 128, 256])
 def test_wmma_linear_matches_fp64_oracle(lib, m):
     if lib.nf12_hip_wmma_supported(m) == 0:
         pytest.skip(f"wmma path not available for m={m}")

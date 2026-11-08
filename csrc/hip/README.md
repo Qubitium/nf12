@@ -86,10 +86,12 @@ hipError_t nf12_hip_selftest(uint32_t* out, hipStream_t stream);
 `analyze` and `encode` synchronize the supplied stream and cannot be graph
 captured, matching the CUDA contract.
 
-Route selection by token count: `m <= 16` uses the fused small-M kernel,
-`17 <= m <= 128` the matrix-core path, and larger `m` should fall back to
-decode-then-rocBLAS. `gfx1250` has no `wmma-128b-insts`; `wmma.hip` compiles to
-an empty translation unit there and `nf12_hip_wmma_supported` returns 0.
+Route selection by token count: `m <= 15` uses the fused small-M kernel,
+`16 <= m <= 256` the matrix-core path, and larger `m` falls back to
+decode-then-rocBLAS. `m=16` is a single 16-token tile and is faster than the
+fused kernel on every measured shape. `gfx1250` has no `wmma-128b-insts`;
+`wmma.hip` compiles to an empty translation unit there and
+`nf12_hip_wmma_supported` returns 0.
 
 ## Correctness
 
@@ -112,30 +114,30 @@ Versus `torch.nn.functional.linear` on the dense BF16 weight, on the same
 weights so the working set exceeds 96 MiB, which is what a real multi-layer
 model does.
 
-| k × n | m=1 | m=16 | m=32 | m=64 | m=128 |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 896×4864 | 1.62× / 1.71× | 0.54× / 0.65× | 0.70× / 0.99× | 0.50× / 0.76× | 0.53× / 0.74× |
-| 2048×8192 | 1.28× / 1.30× | 0.47× / 0.86× | 0.66× / 1.06× | 0.61× / 0.98× | 0.64× / 0.74× |
-| 4096×4096 | 0.84× / 1.16× | 0.42× / 0.89× | 0.40× / 0.83× | 0.42× / 0.75× | 0.65× / 0.66× |
-| 4096×14336 | 1.33× / 1.32× | 1.02× / 1.05× | 1.24× / 1.23× | 1.19× / 1.18× | 0.86× / 0.85× |
-| 4096×28672 | 1.34× / 1.33× | 1.10× / 1.12× | 1.26× / 1.26× | 1.23× / 1.23× | 0.78× / 0.73× |
-| 5120×25600 | 1.38× / 1.39× | 1.17× / 1.19× | 1.26× / 1.27× | 1.22× / 1.21× | 0.83× / 0.79× |
-| 8192×8192 | 1.70× / 1.61× | 0.92× / 0.93× | 1.16× / 1.16× | 1.09× / 1.08× | 0.68× / 0.67× |
-| 8192×57344 | 1.41× / 1.40× | 1.18× / 1.17× | 1.27× / 1.27× | 1.22× / 1.19× | 0.76× / 0.73× |
-| 14336×4096 | 1.35× / 1.32× | 0.96× / 1.00× | 1.12× / 1.12× | 1.10× / 1.14× | 0.79× / 0.78× |
-| 25600×5120 | 1.33× / 1.33× | 0.88× / 0.89× | 1.10× / 1.10× | 1.00× / 0.99× | 0.84× / 0.77× |
+| k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
+| --- | ---: | ---: | ----: | ----: | ----: | ----: |
+| 896×4864 | 1.63× / 1.73× | 0.79× / 0.87× | 0.67× / 0.85× | 0.70× / 0.99× | 0.50× / 0.77× | 0.50× / 0.75× |
+| 2048×8192 | 1.29× / 1.30× | 0.76× / 1.05× | 0.67× / 1.08× | 0.58× / 1.07× | 0.58× / 0.99× | 0.63× / 0.75× |
+| 4096×4096 | 0.84× / 1.16× | 0.71× / 1.03× | 0.46× / 0.89× | 0.40× / 0.82× | 0.41× / 0.75× | 0.59× / 0.66× |
+| 4096×14336 | 1.33× / 1.33× | 1.19× / 1.19× | 1.26× / 1.24× | 1.25× / 1.23× | 1.19× / 1.18× | 0.84× / 0.84× |
+| 4096×28672 | 1.34× / 1.34× | 1.21× / 1.21× | 1.27× / 1.27× | 1.25× / 1.25× | 1.23× / 1.23× | 0.78× / 0.74× |
+| 5120×25600 | 1.38× / 1.38× | 1.30× / 1.30× | 1.28× / 1.28× | 1.26× / 1.25× | 1.22× / 1.22× | 0.82× / 0.77× |
+| 8192×8192 | 1.70× / 1.63× | 1.09× / 1.09× | 1.21× / 1.20× | 1.16× / 1.16× | 1.09× / 1.09× | 0.68× / 0.67× |
+| 8192×57344 | 1.40× / 1.41× | 1.22× / 1.23× | 1.28× / 1.28× | 1.27× / 1.27× | 1.21× / 1.19× | 0.78× / 0.74× |
+| 14336×4096 | 1.35× / 1.32× | 1.22× / 1.21× | 1.20× / 1.20× | 1.13× / 1.13× | 1.11× / 1.17× | 0.79× / 0.80× |
+| 25600×5120 | 1.33× / 1.33× | 1.15× / 1.15× | 1.16× / 1.15× | 1.10× / 1.11× | 1.01× / 0.96× | 0.84× / 0.77× |
 
-Accuracy on every row: `rms_rel ≈ 1.66e-3` (min 1.63e-3, max 1.68e-3), the
-BF16 output-rounding floor. The fused linear has **0 violations** of
+Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
+output-rounding floor. The fused linear has **0 violations** of
 `|err| <= 2e-3 + 2e-3*|ref|` on the project's scaled accuracy harness.
 
-The win is bandwidth: NF12 reads 25% fewer weight bytes. It pays off at `m=1`
-(1.28–1.70× on every shape except `4096×4096` warm) and at `m=32/64` for large
-weights (1.09–1.27×). `m=16` is the weak spot of the small-M fused kernel
-(0.42–1.18×), and `m=128` loses to rocBLAS almost everywhere (0.53–0.86×).
-`4096×4096` loses because its 32 MiB BF16 weight is cache-resident at
-~1.4 TB/s, where the traffic saving cannot pay for the decode — a property of
-the shape, not a tuning gap.
+The win is bandwidth: NF12 reads 25% fewer weight bytes. It pays off from
+`m=8` upward on weights large enough that the packed read dominates:
+1.09–1.30× at `m=8..64` for the 14336/25600/57344-wide shapes, and
+1.20–1.28× at `m=16`. The remaining losses are the small weights
+(`4096×4096`, `2048×8192`, `896×4864`) where the BF16 weight is L2/L3-resident
+and the decode+LDS round-trip dominates, and `m=128`, where rocBLAS is already
+efficient.
 
 ## Porting notes (NVIDIA → AMD)
 
