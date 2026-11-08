@@ -600,6 +600,17 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   if (n_blocks == 0 || m_blocks == 0) return hipSuccess;
   if (n_blocks > 0x7fffLL || m_blocks > 0x7fffLL) return hipErrorInvalidValue;
 
+  // Split-K needs a caller-owned FP32 plane. This matches the CUDA build
+  // (csrc/api.cu, run_linear): the library owns no scratch, and a null or short
+  // buffer is an error rather than something we allocate or silently work
+  // around. A hidden per-device buffer would be shared by every stream and
+  // corrupt concurrent launches; a per-stream arena would need a lifecycle, and
+  // hipMallocAsync/hipFreeAsync measured ~11 us per call, more than the split
+  // saves. The caller allocates from its own caching allocator -- PyTorch's in
+  // csrc/torch/ops.cpp -- which is per device and stream ordered.
+  //
+  // The C-ABI wrapper (c_api.hip, nf12_linear) maps this to
+  // NF12_ERROR_INSUFFICIENT_WORKSPACE, the same code the CUDA build returns.
   float* partial = nullptr;
   if (splits > 1) {
     const size_t needed = nf12_hip_linear_wmma_workspace_bytes(n, k, m);

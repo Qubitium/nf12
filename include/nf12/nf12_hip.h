@@ -68,9 +68,19 @@ int nf12_hip_wmma_max_m(void);
 int nf12_hip_wmma_supported(int64_t m);
 
 /* Device scratch for the split-K reduction, owned by the caller. Returns 0 when
- * the launch chosen for (n, k, m) needs no scratch. Allocate at least this many
- * bytes on the same device and pass the same shape to nf12_hip_linear_wmma;
- * a null or undersized buffer is rejected rather than silently aliased. */
+ * the launch chosen for (n, k, m) needs no scratch.
+ *
+ * This mirrors the CUDA build (csrc/api.cu, run_linear) exactly: the library
+ * owns no scratch, allocates nothing, and keeps no per-device or per-stream
+ * cache. Size the buffer with this function using the SAME (n, k, m) passed to
+ * the launch, and allocate it from the caller's own caching allocator -- on
+ * ROCm that is PyTorch's, which is per device and stream ordered.
+ *
+ * A null or undersized buffer is rejected rather than aliased: nf12_linear
+ * returns NF12_ERROR_INSUFFICIENT_WORKSPACE, the same status the CUDA build
+ * returns, so a caller ported from CUDA sees identical behaviour. Allocating
+ * here instead would mean a single per-device buffer shared by every stream,
+ * which corrupts concurrent launches. */
 size_t nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m);
 hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes,
                                 uint32_t exp_base, const void* x, void* out,

@@ -98,11 +98,29 @@ captured, matching the CUDA contract.
 The library holds no mutable device state. The split-K reduction scratch for
 `nf12_hip_linear_wmma` is owned by the caller: query
 `nf12_hip_linear_wmma_workspace_bytes(n, k, m)` and pass a buffer of at least
-that size (0 bytes means the chosen launch does not split K). A null or short
-buffer is rejected with `hipErrorInvalidValue` rather than aliased, so
-concurrent streams and concurrent host threads are independent. An earlier
+that size (0 bytes means the chosen launch does not split K). An earlier
 revision cached a single process-wide pointer, which was neither per device nor
 per stream; do not reintroduce it.
+
+This mirrors the CUDA build exactly (`csrc/api.cu`, `run_linear`): the library
+owns no scratch, allocates nothing, and keeps no per-device or per-stream cache.
+Thirteen of the forty benchmark `shape × m` cells split K; a null or undersized
+buffer is rejected and `nf12_linear` returns `NF12_ERROR_INSUFFICIENT_WORKSPACE`,
+the same status the CUDA build returns, so a caller ported from CUDA behaves
+identically.
+
+**Where the reusable buffer comes from.** The caller's own caching allocator.
+`csrc/torch/ops.cpp` calls `nf12_linear_workspace_bytes(...)` and takes the
+block from PyTorch's caching allocator, which is per device, stream ordered and
+graph safe, so repeated launches reuse one block instead of allocating. A raw
+C-ABI caller does the same with whatever allocator it already has.
+
+The library deliberately does not allocate this itself, for the same reasons the
+CUDA build does not: a single per-device buffer is shared by every stream, so
+two concurrent launches would write the same FP32 partial planes and corrupt
+both results; a per-stream arena would need a lifecycle, because serving loops
+create and destroy streams; and `hipMallocAsync`/`hipFreeAsync` around each
+launch measured ~11 µs of host time, more than the split saves.
 
 Route selection by token count: `m <= 15` uses the fused small-M kernel,
 `16 <= m <= 256` the matrix-core path, and larger `m` falls back to

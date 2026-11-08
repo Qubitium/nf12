@@ -42,6 +42,19 @@ _U32 = ctypes.c_uint32
 _INT = ctypes.c_int
 
 
+class _Nf12Weight(ctypes.Structure):
+    """``nf12_weight_t`` from include/nf12/nf12.h, for the CUDA-named C ABI."""
+
+    _fields_ = [
+        ("packed", _VOID),
+        ("escapes", _VOID),
+        ("num_escapes", _U32),
+        ("n", _I64),
+        ("k", _I64),
+        ("exp_base", _U8),
+    ]
+
+
 @pytest.fixture(scope="module")
 def lib():
     path = nf12.library_path()
@@ -80,6 +93,13 @@ def lib():
     lib.nf12_hip_linear_wmma.restype = _INT
     lib.nf12_hip_linear_wmma.argtypes = [
         _VOID, _VOID, _U8, _VOID, _VOID, _I64, _I64, _I64, _VOID,
+        _VOID, _SIZE, _VOID,
+    ]
+    # The CUDA-named C ABI, so the ROCm status codes can be compared with the
+    # CUDA build's (csrc/api.cu) rather than only with the HIP-level ones.
+    lib.nf12_linear.restype = _INT
+    lib.nf12_linear.argtypes = [
+        _VOID, _I64, _I64, ctypes.POINTER(_Nf12Weight), _VOID, _VOID, _I64,
         _VOID, _SIZE, _VOID,
     ]
     return lib
@@ -266,10 +286,12 @@ def test_wmma_linear_matches_bf16_twin(lib, m):
 
 
 def test_wmma_split_k_requires_workspace(lib):
-    """The split-K scratch is caller-owned; a null or short buffer is rejected.
+    """Split-K scratch is caller-owned and required, exactly like the CUDA build.
 
     Regression for the process-wide ``g_partial`` pointer: two concurrent
-    streams used to share one partial plane and corrupt each other.
+    streams used to share one partial plane and corrupt each other, so the
+    library never allocates this itself and a null or short buffer is rejected
+    rather than aliased. ``csrc/api.cu`` (``run_linear``) has the same contract.
     """
     n, k, m = 1024, 4096, 64
     assert lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m) > 0
@@ -285,6 +307,37 @@ def test_wmma_split_k_requires_workspace(lib):
     short = torch.empty(need - 1, dtype=torch.uint8, device="cuda")
     assert lib.nf12_hip_linear_wmma(
         *args, short.data_ptr(), short.numel(), _stream()) != 0
+
+
+def test_c_abi_workspace_status_matches_cuda(lib):
+    """``nf12_linear`` must return the CUDA build's status for a missing buffer.
+
+    ``csrc/api.cu`` (``run_linear``) returns NF12_ERROR_INSUFFICIENT_WORKSPACE
+    when the buffer is too small, and NF12_ERROR_INVALID_ARGUMENT only for a
+    malformed call (a non-zero byte count with no pointer, or a misaligned one).
+    A caller ported from CUDA switches on these values, so the ROCm build has to
+    match them rather than collapsing everything into INVALID_ARGUMENT.
+    """
+    nf12_ok, nf12_invalid, nf12_insufficient = 0, 1, 3
+    n, k, m = 1024, 4096, 64
+    need = lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m)
+    assert need > 0
+    torch.manual_seed(31)
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    out = torch.empty((m, n), dtype=torch.bfloat16, device="cuda")
+    packed, escapes, exp_base = _encode(lib, w)
+    view = _Nf12Weight(packed.data_ptr(), escapes.data_ptr(), escapes.shape[0],
+                       n, k, exp_base)
+
+    def call(ws_ptr, ws_bytes):
+        return lib.nf12_linear(x.data_ptr(), m, k, ctypes.byref(view), None,
+                               out.data_ptr(), n, ws_ptr, ws_bytes, _stream())
+
+    assert call(None, 0) == nf12_insufficient
+    assert call(None, need) == nf12_invalid
+    workspace = torch.empty(need, dtype=torch.uint8, device="cuda")
+    assert call(workspace.data_ptr(), need) == nf12_ok
 
 
 def test_wmma_concurrent_streams_are_independent(lib):

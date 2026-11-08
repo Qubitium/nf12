@@ -87,7 +87,24 @@ size_t nf12_linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int) {
 nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w,
                           const void* bias_bf16, void* y_bf16, int64_t ldy, void* workspace,
                           size_t workspace_bytes, cudaStream_t stream) {
+  // The CUDA build gates this through valid_weight() before touching w; without
+  // the null check the shape comparison below would dereference a null pointer.
+  if (w == nullptr || w->packed == nullptr || w->n <= 0 || w->k <= 0 || w->n % 16 != 0 ||
+      w->k % 64 != 0) {
+    return NF12_ERROR_INVALID_ARGUMENT;
+  }
   if (ldx != w->k || ldy != w->n) return NF12_ERROR_INVALID_ARGUMENT;
+  // Same workspace contract as csrc/api.cu (run_linear): a non-zero buffer must
+  // be 16-byte aligned, and anything smaller than the shape needs is
+  // INSUFFICIENT_WORKSPACE rather than INVALID_ARGUMENT. Aligning the code here
+  // matters because a caller ports from CUDA by matching status values.
+  if (workspace_bytes != 0 &&
+      (workspace == nullptr || (reinterpret_cast<uintptr_t>(workspace) & 15u) != 0)) {
+    return NF12_ERROR_INVALID_ARGUMENT;
+  }
+  if (workspace_bytes < nf12_hip_linear_wmma_workspace_bytes(w->n, w->k, m)) {
+    return NF12_ERROR_INSUFFICIENT_WORKSPACE;
+  }
   if (m < 16) {
     return status(nf12_hip_linear_fused(static_cast<const uint8_t*>(w->packed),
                                         static_cast<const uint4*>(w->escapes),
