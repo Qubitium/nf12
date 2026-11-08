@@ -167,3 +167,14 @@ All verified on `gfx1201` hardware:
   kernel is the next step.
 * Only `gfx1200`/`gfx1201` are validated. `gfx1250` builds but takes the
   non-wmma route.
+
+## Credits
+
+* **NF12 format, reference codec and CUDA kernels:** [AlpinDale](https://x.com/AlpinDale),
+  [dphnAI/nf12](https://github.com/dphnAI/nf12), Apache-2.0. This HIP port reads
+  and writes the identical tiled byte stream and follows the same tiling and
+  decode expressions; the SPDX headers in each `.hip`/`.cuh` file carry the
+  original attribution.
+* **NyoomFloat12 format and theory:** *"NyoomFloat12: Accelerating LLM Inference
+  via Lossless 12-bit Weight Compression"*, Liberman, Fang, Zhang, Dao, and Fu —
+  [Together AI](https://www.together.ai/) (2026).
