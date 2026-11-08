@@ -46,7 +46,11 @@
 // ---------------------------------------------------------------------------
 #include "format_hip.cuh"
 
-#include "nf12/nf12_hip.h"
+// The launcher templates below run before the C entry points are defined, so
+// the two queries they need are declared here instead of pulling in the whole
+// public header (which would also drag the CUDA-compat aliases into this file).
+extern "C" int nf12_hip_wmma_max_m(void);
+extern "C" size_t nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m);
 
 #include <hip/hip_runtime_api.h>
 

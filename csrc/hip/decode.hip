@@ -270,19 +270,34 @@ hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t ex
   // The token count is a template parameter so the accumulators and the
   // warp-partial plane stay compile-time sized; a runtime `m` keeps the
   // accumulator array out of VGPRs and costs 3-5x.
-  using Fn = void (*)(const __hip_bfloat16*, const uint4*, const uint4*, uint32_t, int64_t,
-                      int64_t, __hip_bfloat16*, const __hip_bfloat16*);
-  static constexpr Fn kFns[] = {
-      nullptr,
-      linear_kernel<S, 1>,  linear_kernel<S, 2>,  linear_kernel<S, 3>,  linear_kernel<S, 4>,
-      linear_kernel<S, 5>,  linear_kernel<S, 6>,  linear_kernel<S, 7>,  linear_kernel<S, 8>,
-      linear_kernel<S, 9>,  linear_kernel<S, 10>, linear_kernel<S, 11>, linear_kernel<S, 12>,
-      linear_kernel<S, 13>, linear_kernel<S, 14>, linear_kernel<S, 15>, linear_kernel<S, 16>,
-  };
-  kFns[m]<<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
-      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),
-      escapes, exp_base_x4(exp_base), n, k, reinterpret_cast<__hip_bfloat16*>(out),
-      reinterpret_cast<const __hip_bfloat16*>(bias));
+  //
+  // A switch, not a table of function pointers: torch's hipify rewrites
+  // `kernel<<<...>>>` by matching an identifier, so a launch through an indexed
+  // expression is silently mangled.
+#define NF12_AD_FUSED_LAUNCH(K)                                                              \
+  linear_kernel<S, K><<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>( \
+      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), \
+      escapes, exp_base_x4(exp_base), n, k, reinterpret_cast<__hip_bfloat16*>(out),       \
+      reinterpret_cast<const __hip_bfloat16*>(bias))
+  switch (m) {
+    case 1: NF12_AD_FUSED_LAUNCH(1); break;
+    case 2: NF12_AD_FUSED_LAUNCH(2); break;
+    case 3: NF12_AD_FUSED_LAUNCH(3); break;
+    case 4: NF12_AD_FUSED_LAUNCH(4); break;
+    case 5: NF12_AD_FUSED_LAUNCH(5); break;
+    case 6: NF12_AD_FUSED_LAUNCH(6); break;
+    case 7: NF12_AD_FUSED_LAUNCH(7); break;
+    case 8: NF12_AD_FUSED_LAUNCH(8); break;
+    case 9: NF12_AD_FUSED_LAUNCH(9); break;
+    case 10: NF12_AD_FUSED_LAUNCH(10); break;
+    case 11: NF12_AD_FUSED_LAUNCH(11); break;
+    case 12: NF12_AD_FUSED_LAUNCH(12); break;
+    case 13: NF12_AD_FUSED_LAUNCH(13); break;
+    case 14: NF12_AD_FUSED_LAUNCH(14); break;
+    case 15: NF12_AD_FUSED_LAUNCH(15); break;
+    default: NF12_AD_FUSED_LAUNCH(16); break;
+  }
+#undef NF12_AD_FUSED_LAUNCH
   return hipGetLastError();
 }
 
