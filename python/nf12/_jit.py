@@ -17,8 +17,9 @@ from pathlib import Path
 
 import torch
 
-# The HIP port currently ships only the C library; there is no ROCm torch
-# extension yet, so the two backends produce different sets of artifacts.
+# Both backends build a torch extension. On ROCm the kernels land in
+# libnf12_hip.so and the op layer in libnf12_torch.so (the same ops.cpp as the
+# CUDA build), so the artifact names differ but the set does not.
 _LIBRARIES_CUDA = ("libnf12.so", "libnf12_torch.so")
 _LIBRARIES_HIP = ("libnf12_hip.so", "libnf12_torch.so")
 _BUILD_ENV = (

@@ -4,9 +4,10 @@ A HIP port of the NF12 codec and fused linear kernels for AMD RDNA4. It
 consumes and produces the **identical tiled byte stream** as the CUDA kernels,
 so a checkpoint is portable in both directions.
 
-Status: **decode, encode and the matrix-core fused path are implemented and
-validated on a Radeon AI PRO R9700 (`gfx1201`)**. Not yet wired into the
-`python/nf12` API or the torch extension — see *Follow-ups*.
+Status: **decode, encode, the matrix-core fused path, the bf16t twin and the
+full MoE op set are implemented and validated on a Radeon AI PRO R9700
+(`gfx1201`)**, and wired into `python/nf12` / `torch.ops.nf12` — the torch
+extension builds on ROCm and shares `csrc/torch/ops.cpp` with the CUDA build.
 
 ## What is here
 
@@ -15,7 +16,11 @@ validated on a Radeon AI PRO R9700 (`gfx1201`)**. Not yet wired into the
 | `format_hip.cuh` | SPEC §4 geometry, AMD `v_perm_b32` selector conversion, `decode_bulk`/`decode_group`, tiling helpers, wmma fragment helpers. |
 | `decode.hip` | `nf12_hip_decode` (NF12 → exact BF16), `nf12_hip_linear_fused` (small-M fused decode+GEMM; the dispatcher uses it for `m <= 15` and sends `m = 16` to the matrix-core path), `nf12_hip_selftest`. |
 | `encode.hip` | Native analyze/count/scan/write encoder (`nf12_hip_encode_workspace_bytes`, `nf12_hip_encode_analyze`, `nf12_hip_encode`). |
-| `wmma.hip` | `nf12_hip_linear_wmma`, the matrix-core fused path for `16 <= m <= 256`. |
+| `wmma.hip` | `nf12_hip_linear_wmma` (matrix cores, `16 <= m <= 256`), `nf12_hip_linear_wmma_bf16t`, and the routed `nf12_hip_moe_linear{,_bf16t}`. |
+| `moe.hip` | `moe_align` (stable counting sort), `moe_combine`, `moe_silu_mul`, `moe_decode`, `moe_grouped_operands`. |
+| `embedding.hip` | `nf12_hip_embedding` for int32/int64 ids (bit-exact vs CUDA). |
+| `pack_bf16t.hip` | BF16 → bf16t twin packing (bit-exact vs CUDA). |
+| `c_api.hip`, `c_api_moe.hip` | The `nf12_*` C API of `include/nf12/nf12.h` on top of these kernels, so `csrc/torch/ops.cpp` compiles unchanged. |
 
 ## Build
 
@@ -104,6 +109,75 @@ decode-then-rocBLAS. `m=16` is a single 16-token tile and is faster than the
 fused kernel on every measured shape. `gfx1250` has no `wmma-128b-insts`;
 `wmma.hip` compiles to an empty translation unit there and
 `nf12_hip_wmma_supported` returns 0.
+
+## torch extension on ROCm
+
+`csrc/torch/ops.cpp` is the op schema, argument checking, workspace allocation
+and dispatch layer for the CUDA build. Instead of writing a second op layer for
+ROCm, the HIP build compiles **the same `ops.cpp`** and backs it with
+`c_api.hip` + `c_api_moe.hip`, which implement the `nf12_*` C API on top of the
+HIP kernels. `nf12/nf12.h` supplies HIP aliases for the handful of CUDA
+spellings the shared layer uses (`cudaStream_t`, `cudaError_t`,
+`cudaMemcpyAsync`, …), so there is one op implementation, not two.
+
+```sh
+cmake -S . -B build/hip -G Ninja -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=ON \
+      -DNF12_HIP_ARCHS=gfx1201 -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++
+cmake --build build/hip --target nf12_torch -j
+```
+
+`nf12_torch` links `libnf12_hip.so` and `torch_hip`. It relies on
+`aoti_torch_get_current_cuda_stream` and `aoti_torch_cuda_{mm,addmm}_out`,
+which exist in ROCm's `libtorch_hip.so`; `USE_ROCM` exposes the stream shim in
+torch's stable-ABI header.
+
+Coverage, all exercised by `tests/hip/test_torch_ops.py` and
+`tests/hip/test_torch_moe.py`:
+
+| op | ROCm status |
+| --- | --- |
+| `encode`, `decode`, `encode_moe` | native |
+| `linear`, `linear_bf16t` | native (`linear_bf16t` for any `m`) |
+| `pack_bf16t` | native |
+| `embedding` (int32/int64) | native |
+| `moe_align`, `moe_combine`, `moe_silu_mul`, `moe_decode` | native |
+| `moe_linear`, `moe_linear_bf16t`, `_fused_moe` | native |
+| `_fused_moe` fast path | not ported; `ops.cpp` composes the ops above, which is the same result |
+
+Two deliberate choices:
+
+* **No `aten::_grouped_mm` dependency.** `nf12_moe_linear_decode_gemm_rows`
+  returns 0, so the decode + grouped-GEMM shortcut is never selected and MoE
+  never needs a ROCm grouped GEMM.
+* **The bf16t twin is a template parameter, not a second kernel.**
+  `WeightSource::{kNf12, kBf16t}` selects how a super-atom's planes become atom
+  registers; decode, matrix cores and the epilogue are shared. The twin is the
+  exactness reference for the nf12 route (SPEC §6.2), so it must run the same
+  arithmetic.
+
+`moe_linear` reuses the dense matrix-core kernel with a row map enabled
+(`kRouted`): one CTA per (expert, 16-row weight block, 16-assignment tile), the
+expert resolved on device from `expert_offsets`, `gather`/`scatter`/`row_scale`
+applied around the same FP32 accumulator. Per-expert counts stay device-side,
+so the launch is host-synchronisation free and graph-capturable.
+
+### MoE throughput (R9700, `gfx1201`, E=8, N=K=4096, topk=2)
+
+Against a naive dense-BF16 baseline that loops over experts with
+`torch.arange`/`F.linear`-style FP32 matmuls and BF16 rounding — i.e. what a
+straightforward implementation does, not a tuned grouped GEMM:
+
+| tokens | nf12 `moe_linear` µs | dense BF16 loop µs | speedup |
+| ---: | ---: | ---: | ---: |
+| 16 | 375.9 | 2431.2 | 6.47× |
+| 64 | 485.5 | 2461.2 | 5.07× |
+| 128 | 695.5 | 2556.4 | 3.68× |
+| 512 | 2423.7 | 3990.5 | 1.65× |
+| 1024 | 4948.2 | 6020.8 | 1.22× |
+
+The advantage is the 25% smaller weight read, so it shrinks as the activation
+side grows. Above ~1k tokens a real grouped GEMM would win; that is the
+follow-up, and it is why the MoE GEMM is not claimed to be tensor-core optimal.
 
 ## Correctness
 
@@ -320,15 +394,15 @@ All verified on `gfx1201` hardware:
 
 ## Follow-ups
 
-* Port the torch extension and the `nf12.nn` / `torch.ops.nf12` Python API. The
-  C library, the JIT build and `nf12.library_path()` are wired today;
-  `nf12._library.load()` raises a clear error on ROCm rather than failing
-  obscurely.
 * Unify the geometry constants with `include/nf12/format.cuh`. `format_hip.cuh`
   currently restates them and `static_assert`s that they match, so a format
   change breaks the build rather than silently diverging.
-* `m > 128` still falls back to decode-then-rocBLAS; a larger-tile matrix-core
-  kernel is the next step.
+* `m > 128` on the dense nf12 route still falls back to decode-then-rocBLAS; a
+  larger-tile matrix-core kernel is the next step.
+* The MoE route runs one 16-assignment tile per CTA, so the packed weight is
+  re-read once per 16 assignments of an expert. That wins from 16 to ~1k tokens
+  against a dense-BF16 loop, but a multi-tile CTA (or split-K) is the next step
+  for large token counts.
 * Only `gfx1200`/`gfx1201` are validated. `gfx1250` builds but takes the
   non-wmma route.
 

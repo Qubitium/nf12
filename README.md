@@ -51,25 +51,33 @@ cmake --build build/c
 
 ## AMD RDNA4 (ROCm)
 
-The HIP backend provides support and a [C API](include/nf12/nf12_hip.h) for
-`gfx1200` and `gfx1201`.
-
-The Python APIs, including `nf12.nn` and `torch.ops.nf12` are not available for HIP.
+The HIP backend supports `gfx1200` and `gfx1201` with a
+[C API](include/nf12/nf12_hip.h), and the full `python/nf12` /
+`torch.ops.nf12` API: the torch extension compiles the *same*
+`csrc/torch/ops.cpp` as the CUDA build and backs it with the HIP kernels, so
+there is one op layer rather than a second ROCm implementation. That covers
+encode/decode, `linear` (including the bf16t twin), `pack_bf16t`, `embedding`
+and the whole MoE op set (`moe_align`, `moe_linear`, `moe_combine`,
+`moe_silu_mul`, `moe_decode`, `_fused_moe`).
 
 Build from source with the ROCm toolkit, a C++ compiler, CMake 3.26+ and Ninja.
 
 ```bash
 cmake -S . -B build/hip -G Ninja \
-  -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=OFF \
+  -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=ON \
   -DNF12_HIP_ARCHS=gfx1201 \
   -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++
-cmake --build build/hip --target nf12_hip
+cmake --build build/hip --target nf12_torch
 ```
 
-Use `-DNF12_HIP_ARCHS=gfx1200` for a `gfx1200` GPU.
+Use `-DNF12_HIP_ARCHS=gfx1200` for a `gfx1200` GPU, or drop
+`-DNF12_BUILD_TORCH=ON` to build only the C library. `nf12._jit` does the same
+configuration automatically on a ROCm host, so `import nf12` is enough for a
+source checkout.
 
-Fused linear kernels support batches of 1–256 tokens. For larger batches,
-the caller must decode the weights and run a BF16 GEMM.
+Fused linear kernels support batches of 1–256 tokens. For larger batches the
+caller must decode the weights and run a BF16 GEMM (the torch layer does this
+for you).
 
 See the [HIP documentation](csrc/hip/README.md) for R9700 benchmark results
 and kernel implementation details.
