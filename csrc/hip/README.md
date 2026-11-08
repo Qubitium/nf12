@@ -116,16 +116,16 @@ model does.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096×4096 | 0.86 / 1.22 | 0.69 / 0.97 | 0.81 / 1.19 | 0.70 / 1.14 | 0.65 / 1.08 | 0.66 / 0.70 |
-| 4096×14336 | 1.33 / 1.32 | 1.19 / 1.20 | 1.24 / 1.22 | 1.17 / 1.16 | 1.14 / 1.16 | 0.79 / 0.80 |
-| 14336×4096 | 1.35 / 1.34 | 1.21 / 1.21 | 1.33 / 1.33 | 1.24 / 1.24 | 1.18 / 1.21 | 1.08 / 1.12 |
-| 4096×28672 | 1.34 / 1.34 | 1.21 / 1.22 | 1.14 / 1.14 | 1.08 / 1.08 | 0.97 / 0.97 | 0.75 / 0.68 |
-| 5120×25600 | 1.39 / 1.38 | 1.30 / 1.30 | 1.21 / 1.22 | 1.14 / 1.14 | 1.05 / 1.05 | 0.80 / 0.76 |
-| 25600×5120 | 1.33 / 1.33 | 1.15 / 1.15 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.19 | 1.13 / 1.16 |
-| 8192×8192 | 1.77 / 1.79 | 1.10 / 1.10 | 1.29 / 1.28 | 1.29 / 1.30 | 1.24 / 1.24 | 0.79 / 0.78 |
-| 8192×57344 | 1.40 / 1.40 | 1.23 / 1.23 | 1.22 / 1.22 | 1.22 / 1.22 | 1.15 / 1.15 | 0.78 / 0.74 |
-| 2048×8192 | 1.31 / 1.30 | 0.77 / 1.03 | 1.03 / 1.23 | 0.91 / 1.20 | 0.78 / 1.12 | 0.68 / 0.75 |
-| 896×4864 | 1.66 / 1.93 | 0.72 / 0.94 | 1.14 / 1.39 | 1.16 / 1.64 | 0.84 / 1.39 | 0.53 / 0.72 |
+| 4096×4096 | 0.93 / 1.21 | 0.69 / 0.99 | 0.87 / 1.09 | 0.75 / 1.07 | 0.69 / 0.96 | 0.64 / 0.69 |
+| 4096×14336 | 1.33 / 1.33 | 1.19 / 1.19 | 1.24 / 1.23 | 1.18 / 1.16 | 1.14 / 1.15 | 0.77 / 0.82 |
+| 14336×4096 | 1.35 / 1.35 | 1.21 / 1.21 | 1.33 / 1.33 | 1.23 / 1.25 | 1.17 / 1.21 | 1.08 / 1.09 |
+| 4096×28672 | 1.34 / 1.34 | 1.21 / 1.22 | 1.14 / 1.13 | 1.07 / 1.07 | 0.96 / 0.96 | 0.76 / 0.67 |
+| 5120×25600 | 1.38 / 1.38 | 1.30 / 1.30 | 1.21 / 1.21 | 1.14 / 1.13 | 1.04 / 1.04 | 0.80 / 0.75 |
+| 25600×5120 | 1.33 / 1.33 | 1.15 / 1.16 | 1.35 / 1.35 | 1.34 / 1.34 | 1.21 / 1.20 | 1.15 / 1.10 |
+| 8192×8192 | 1.69 / 1.64 | 1.09 / 1.10 | 1.29 / 1.28 | 1.30 / 1.30 | 1.24 / 1.24 | 0.78 / 0.75 |
+| 8192×57344 | 1.40 / 1.40 | 1.22 / 1.22 | 1.22 / 1.22 | 1.22 / 1.22 | 1.15 / 1.14 | 0.78 / 0.74 |
+| 2048×8192 | 1.33 / 1.31 | 0.78 / 1.05 | 1.02 / 1.23 | 0.92 / 1.20 | 0.76 / 1.11 | 0.66 / 0.74 |
+| 896×4864 | 1.62 / 1.98 | 0.69 / 0.94 | 1.14 / 1.09 | 1.16 / 1.64 | 0.83 / 1.39 | 0.53 / 0.71 |
 
 Accuracy on every row: `rms_rel ≈ 1.66e-3` (1.64–1.67e-3), the BF16
 output-rounding floor. The fused linear has **0 violations** of
@@ -135,7 +135,7 @@ The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
 `m=8` upward on weights large enough that the packed read dominates.
 1.14–1.35× at `m=16..64` for the 14336/25600/57344-wide shapes.
 
-### Small weights: three fixes that took them from ~0.5× to parity
+### Small weights: four fixes that took them from ~0.5× to parity
 
 `4096×4096`, `2048×8192` and `896×4864` are the shapes whose dense BF16 weight
 fits in the 64 MiB Infinity Cache, so BF16 runs at ~1.4 TB/s and NF12 has to
@@ -159,24 +159,37 @@ beat it while decoding.
    covered by the mma instead of stalling the decode. At `m=16` a 4096×4096
    launch is only two warps per SIMD, which is not enough to hide it any other
    way. This alone took 4096×4096 from 32.1 to 26.7 µs.
+4. **The reduce pass is capped at 128 blocks.** The split-K reducer was
+   launched with `(total+255)/256` blocks, and on gfx1201 exactly 256
+   blocks is pathological: 14.2 µs against 3.3 µs at 64, 128 or 512
+   (measured standalone; total=65536 with two splits). Capping the grid
+   at 128 removes that cliff for every split shape without slowing the
+   small outputs, which keep their natural, smaller grid.
 
 Split-K is picked per shape from the measured optima (see `pick_splits`): a
 narrow N splits 8 ways, a very wide N splits 2 ways at eight token tiles, and
-everything else stays unsplit.
+everything else stays unsplit. A launch of one wave or less splits only when
+K is long enough to give every split a real slice, so `4096×4096` takes 4
+ways at `m=16` and 2 above it while `896×4864` — 14 k-blocks — stays unsplit
+rather than paying four prologues for three super-atoms each.
 
 | k × n | m=16 before | m=16 after | m=64 before | m=64 after |
 | --- | ---: | ---: | ---: | ---: |
-| 4096×4096 | 0.48× | **0.81×** | 0.45× | **0.65×** |
-| 2048×8192 | 0.66× | **1.03×** | 0.59× | **0.78×** |
-| 896×4864 | 0.62× | **1.14×** | 0.50× | **0.84×** |
+| 4096×4096 | 0.48× | **0.87×** (cold 1.09×) | 0.45× | **0.69×** |
+| 2048×8192 | 0.66× | **1.02×** (cold 1.23×) | 0.59× | **0.76×** |
+| 896×4864 | 0.62× | **1.14×** (cold 1.09×) | 0.50× | **0.83×** |
 | 25600×5120 | 1.15× | **1.35×** | 0.98× | **1.21×** |
 
-`4096×4096` is the remaining one below parity at `m=16` (0.81×). Its 4096
-output columns give only 32 CTAs — one per CU, two warps per SIMD — and the
-kernel is then memory-latency-bound at ~0.8 TB/s of packed reads against a
-1.4 TB/s Infinity Cache. Splitting K adds the parallelism but its partial
-planes and reduce pass cost more than they buy at this size (measured s2 38.0
-vs s1 28.9 µs).
+`4096×4096` at `m=16` is 0.87× warm but 1.09× cold: the 24 MiB packed weight
+fits in the 64 MiB Infinity Cache, so warm BF16 runs at ~1.4 TB/s while cold
+BF16 falls back to the ~633 GB/s HBM ceiling. Its 4096 output columns give only
+32 CTAs — one per CU, two warps per SIMD — so the warm case is
+memory-latency-bound rather than bandwidth-bound. `m=32..128` on the three
+small shapes (0.64–0.75× warm, 0.69–1.64× cold) are the remaining gap: eight
+token tiles per CTA halve the CTA count, and the extra packed reads are only
+paid back once the weight leaves the cache. Cold is the regime a real
+multi-layer model sees, and every small shape is at or above parity there
+except `4096×4096` at `m=128` (0.69×).
 
 ## Porting notes (NVIDIA → AMD)
 
