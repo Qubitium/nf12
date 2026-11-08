@@ -311,6 +311,61 @@ __device__ __forceinline__ void source_planes_to_atoms(
   }
 }
 
+// One token row dotted against one decoded 16x64 super-atom.
+//
+// `regs` is this lane's AtomRegs for the super-atom and `xrow` points at the
+// 64-column window of the token row as packed bf16 pairs. `t` is the lane's
+// quad position (lane & 3). The two sums this lane contributes are returned in
+// `lo` (row g = lane >> 2) and `hi` (row g + 8); the caller collapses the four
+// t lanes of the quad with a fixed xor order, exactly as `linear_kernel` does.
+//
+// regs[j][i] = R_i of atom j (SPEC 4.1):
+//   R0 -> row g,   cols 2t, 2t+1      R1 -> row g+8, cols 2t, 2t+1
+//   R2 -> row g,   cols 2t+8, 2t+9    R3 -> row g+8, cols 2t+8, 2t+9
+//
+// Packed BF16 dot, one v_dot2_f32_bf16 per two columns. This is the RDNA4
+// counterpart of the CUDA mma bf16 path: without it the inner loop is scalar
+// FMA and the kernel is compute-bound instead of bandwidth-bound.
+// (__builtin_amdgcn_fdot2 is FP16, not BF16 -- using it here silently produced
+// garbage, so the explicit _f32_bf16 spelling matters.)
+//
+// This lives in the header because both the dense fused GEMV (decode.hip) and
+// the single-token MoE path (fused_decode.hip) walk the same atoms; a second
+// copy of the 16-intrinsic chain would be the easiest place for the two routes
+// to silently diverge.
+__device__ __forceinline__ void dot_super_atom(const AtomRegs& regs,
+                                               const __hip_bfloat162* __restrict__ xrow, int t,
+                                               float& lo, float& hi) {
+  const __hip_bfloat162* r = reinterpret_cast<const __hip_bfloat162*>(&regs[0][0]);
+  const __hip_bfloat162* xp = xrow + t;
+  const __hip_bfloat162 c0 = xp[0];
+  const __hip_bfloat162 c8 = xp[4];
+  const __hip_bfloat162 c16 = xp[8];
+  const __hip_bfloat162 c24 = xp[12];
+  const __hip_bfloat162 c32 = xp[16];
+  const __hip_bfloat162 c40 = xp[20];
+  const __hip_bfloat162 c48 = xp[24];
+  const __hip_bfloat162 c56 = xp[28];
+
+  // r[4*j + i] is R_i of atom j: row g uses i = 0 and 2, row g+8 uses 1 and 3.
+  lo = __builtin_amdgcn_fdot2_f32_bf16(c0, r[0], lo, false);
+  lo = __builtin_amdgcn_fdot2_f32_bf16(c8, r[2], lo, false);
+  hi = __builtin_amdgcn_fdot2_f32_bf16(c0, r[1], hi, false);
+  hi = __builtin_amdgcn_fdot2_f32_bf16(c8, r[3], hi, false);
+  lo = __builtin_amdgcn_fdot2_f32_bf16(c16, r[4], lo, false);
+  lo = __builtin_amdgcn_fdot2_f32_bf16(c24, r[6], lo, false);
+  hi = __builtin_amdgcn_fdot2_f32_bf16(c16, r[5], hi, false);
+  hi = __builtin_amdgcn_fdot2_f32_bf16(c24, r[7], hi, false);
+  lo = __builtin_amdgcn_fdot2_f32_bf16(c32, r[8], lo, false);
+  lo = __builtin_amdgcn_fdot2_f32_bf16(c40, r[10], lo, false);
+  hi = __builtin_amdgcn_fdot2_f32_bf16(c32, r[9], hi, false);
+  hi = __builtin_amdgcn_fdot2_f32_bf16(c40, r[11], hi, false);
+  lo = __builtin_amdgcn_fdot2_f32_bf16(c48, r[12], lo, false);
+  lo = __builtin_amdgcn_fdot2_f32_bf16(c56, r[14], lo, false);
+  hi = __builtin_amdgcn_fdot2_f32_bf16(c48, r[13], hi, false);
+  hi = __builtin_amdgcn_fdot2_f32_bf16(c56, r[15], hi, false);
+}
+
 
 // ---------------------------------------------------------------------------
 // Encode (SPEC.md 2, "Reference encode")

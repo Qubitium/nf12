@@ -58,7 +58,9 @@ The HIP backend supports `gfx1200` and `gfx1201` with a
 there is one op layer rather than a second ROCm implementation. That covers
 encode/decode, `linear` (including the bf16t twin), `pack_bf16t`, `embedding`
 and the whole MoE op set (`moe_align`, `moe_linear`, `moe_combine`,
-`moe_silu_mul`, `moe_decode`, `_fused_moe`).
+`moe_silu_mul`, `moe_decode`, `_fused_moe`). `_fused_moe` at `T == 1` takes a
+native two-kernel fused route instead of the composed one; see
+[`csrc/hip/README.md`](csrc/hip/README.md).
 
 Build from source with the ROCm toolkit, a C++ compiler, CMake 3.26+ and Ninja.
 

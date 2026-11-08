@@ -27,13 +27,16 @@ add_library(nf12_hip SHARED
   encode.hip
   wmma.hip
   moe.hip
+  fused_decode.hip
   embedding.hip
   pack_bf16t.hip
   c_api.hip
   c_api_moe.hip)
 target_include_directories(nf12_hip
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  # ``torch/fused_decode.h`` is a plain POD header (no torch includes), shared
+  # with the CUDA build so both backends expose the same seam.
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/..)
 # csrc/torch/ops.cpp includes nf12/nf12.h; NF12_HIP selects the HIP aliases
 # there so the same op layer builds for both backends.
 target_compile_definitions(nf12_hip PUBLIC NF12_HIP)
@@ -70,8 +73,7 @@ if(NF12_BUILD_TORCH)
   find_library(NF12_TORCH_CPU_LIB torch_cpu PATHS "${NF12_TORCH_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
   find_library(NF12_TORCH_HIP_LIB torch_hip PATHS "${NF12_TORCH_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
   add_library(nf12_torch SHARED
-    ${CMAKE_CURRENT_SOURCE_DIR}/../torch/ops.cpp
-    fused_decode_stub.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../torch/ops.cpp)
   target_include_directories(nf12_torch SYSTEM PRIVATE "${NF12_TORCH_DIR}/include")
   target_include_directories(nf12_torch PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
   # USE_ROCM exposes the CUDA-named stream shim in torch's stable ABI header.

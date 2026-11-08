@@ -174,52 +174,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     AtomRegs regs;
     source_planes_to_atoms<S>(planes, base_x4, escapes, regs);
 
-    // regs[j][i] = R_i of atom j (SPEC 4.1):
-    //   R0 -> row g,   cols 2t, 2t+1      R1 -> row g+8, cols 2t, 2t+1
-    //   R2 -> row g,   cols 2t+8, 2t+9    R3 -> row g+8, cols 2t+8, 2t+9
-    // Packed BF16 dot, one v_dot2_f32_bf16 per two columns. This is the RDNA4
-    // counterpart of the CUDA mma bf16 path: without it the inner loop is
-    // scalar FMA and the kernel is compute-bound instead of bandwidth-bound.
-    // (__builtin_amdgcn_fdot2 is FP16, not BF16 -- using it here silently
-    // produced garbage, so the explicit _f32_bf16 spelling matters.)
-    const __hip_bfloat162* r = reinterpret_cast<const __hip_bfloat162*>(&regs[0][0]);
-
-    // x is [M, K]; the super-atom covers 64 columns starting at kb*64.
+    // regs[j][i] = R_i of atom j (SPEC 4.1); the packed BF16 dot lives in
+    // format_hip.cuh so the MoE single-token route runs the identical chain.
     const __hip_bfloat162* xrow =
         reinterpret_cast<const __hip_bfloat162*>(x + kb * kSuperAtomCols);
 
     for (int mi = 0; mi < kM; ++mi) {
-      const __hip_bfloat162* xp = xrow + mi * (k / 2) + t;
-      const __hip_bfloat162 c0 = xp[0];    // cols 2t, 2t+1
-      const __hip_bfloat162 c8 = xp[4];    // cols 2t+8, 2t+9
-      const __hip_bfloat162 c16 = xp[8];
-      const __hip_bfloat162 c24 = xp[12];
-      const __hip_bfloat162 c32 = xp[16];
-      const __hip_bfloat162 c40 = xp[20];
-      const __hip_bfloat162 c48 = xp[24];
-      const __hip_bfloat162 c56 = xp[28];
-
-      // r[4*j + i] is R_i of atom j: row g uses i = 0 and 2, row g+8 uses
-      // i = 1 and 3.
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c0, r[0], acc[mi][0], false);
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c8, r[2], acc[mi][0], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c0, r[1], acc[mi][1], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c8, r[3], acc[mi][1], false);
-
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c16, r[4], acc[mi][0], false);
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c24, r[6], acc[mi][0], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c16, r[5], acc[mi][1], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c24, r[7], acc[mi][1], false);
-
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c32, r[8], acc[mi][0], false);
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c40, r[10], acc[mi][0], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c32, r[9], acc[mi][1], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c40, r[11], acc[mi][1], false);
-
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c48, r[12], acc[mi][0], false);
-      acc[mi][0] = __builtin_amdgcn_fdot2_f32_bf16(c56, r[14], acc[mi][0], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c48, r[13], acc[mi][1], false);
-      acc[mi][1] = __builtin_amdgcn_fdot2_f32_bf16(c56, r[15], acc[mi][1], false);
+      dot_super_atom(regs, xrow + mi * (k / 2), t, acc[mi][0], acc[mi][1]);
     }
   }
 

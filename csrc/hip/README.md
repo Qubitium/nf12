@@ -18,6 +18,7 @@ extension builds on ROCm and shares `csrc/torch/ops.cpp` with the CUDA build.
 | `encode.hip` | Native analyze/count/scan/write encoder (`nf12_hip_encode_workspace_bytes`, `nf12_hip_encode_analyze`, `nf12_hip_encode`). |
 | `wmma.hip` | `nf12_hip_linear_wmma` (matrix cores, `16 <= m <= 256`), `nf12_hip_linear_wmma_bf16t`, and the routed `nf12_hip_moe_linear{,_bf16t}`. |
 | `moe.hip` | `moe_align` (stable counting sort), `moe_combine`, `moe_silu_mul`, `moe_decode`, `moe_grouped_operands`. |
+| `fused_decode.hip` | The `nf12::torch_detail::fused_decode` seam for `_fused_moe` at `T == 1` (gate/SiLU and down/combine in two launches), so the torch op layer and the C ABI are identical on both backends. |
 | `embedding.hip` | `nf12_hip_embedding` for int32/int64 ids (bit-exact vs CUDA). |
 | `pack_bf16t.hip` | BF16 → bf16t twin packing (bit-exact vs CUDA). |
 | `c_api.hip`, `c_api_moe.hip` | The `nf12_*` C API of `include/nf12/nf12.h` on top of these kernels, so `csrc/torch/ops.cpp` compiles unchanged. |
@@ -141,8 +142,46 @@ Coverage, all exercised by `tests/hip/test_torch_ops.py` and
 | `pack_bf16t` | native |
 | `embedding` (int32/int64) | native |
 | `moe_align`, `moe_combine`, `moe_silu_mul`, `moe_decode` | native |
-| `moe_linear`, `moe_linear_bf16t`, `_fused_moe` | native |
-| `_fused_moe` fast path | not ported; `ops.cpp` composes the ops above. Same numerics contract but not bit-identical, and ~3% slower at `T=1` (the only `T` it covers) |
+| `moe_linear`, `moe_linear_bf16t` | native |
+| `_fused_moe` | native: `T == 1` takes the fused two-kernel route below, `T > 1` the composed route |
+
+### `_fused_moe` at `T == 1`
+
+`ops.cpp` asks `nf12::torch_detail::fused_decode_supported` before it allocates
+anything and, when that says yes, calls `fused_decode`, which must not fall back
+afterwards. On ROCm that seam is `fused_decode.hip`: a gate kernel (`x -> 2I`,
+BF16 round, `SiLU(gate) * up`, one BF16 round) and a down kernel (per-assignment
+scale in FP32 plus BF16 round, top-k summed in FP32 in increasing `j`, one final
+round), which is `moe_silu_mul` / `round_assignment` / `moe_combine` evaluated
+inline. Both resolve the expert from `topk_ids` on device, so there is no host
+synchronisation and no workspace -- the activation plane is the caller's
+`[topk, I]` buffer.
+
+The CUDA original (`csrc/torch/fused_decode.cu`) is not transliterable: it needs
+thread-block clusters, PDL and the `small_m_core` bulk ring, none of which exist
+on RDNA4. The down kernel therefore keeps the whole top-k walk inside one CTA,
+which is what preserves the ordered reduction without atomics.
+
+Warm `T = 1`, `E = max(2, topk)`, distinct expert ids, median of 100 launches,
+against the composed `moe_*` route:
+
+| K | I | n | topk | fused (µs) | composed (µs) | ratio |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 | 14336 | 4096 | 2 | 842.8 | 945.2 | 1.12× |
+| 4096 | 14336 | 4096 | 1 | 428.3 | 491.8 | 1.15× |
+| 4096 | 14336 | 4096 | 4 | 1672.1 | 1800.2 | 1.08× |
+| 4096 | 4096 | 4096 | 2 | 253.7 | 288.7 | 1.14× |
+| 2048 | 8192 | 2048 | 2 | 248.0 | 307.5 | 1.24× |
+| 4096 | 1024 | 4096 | 2 | 38.5 | 97.5 | 2.53× |
+| 5120 | 25600 | 5120 | 2 | 1868.9 | 2029.8 | 1.09× |
+| 4096 | 7168 | 4096 | 2 | 427.8 | 463.3 | 1.08× |
+
+The fused route is faster at every shape measured (1.08× to 2.53×): it drops
+`moe_align`, `moe_silu_mul` and `moe_combine` plus the two intermediate BF16
+round-trips. It is *not* bit-identical to the composed route -- the K walk has a
+different FP32 association order, exactly like the CUDA fused kernel -- so
+`tests/hip/test_torch_moe.py` asserts the SPEC 6.2 tolerance against both the
+reference and the composed path, plus determinism and multi-stream independence.
 
 Two deliberate choices:
 

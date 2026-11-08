@@ -339,3 +339,119 @@ def test_ops_are_multi_stream_safe():
     # would show up as one overwriting the other's partial sums.
     for g0, g1 in zip(out[0], out[1]):
         assert g0.view(torch.int16).equal(g1.view(torch.int16))
+
+
+# ---------------------------------------------------------------------------
+# fused single-token MoE (nf12::torch_detail::fused_decode)
+# ---------------------------------------------------------------------------
+def _composed_moe(x, w13q, w2q, weights, ids, experts):
+    """The route ``ops.cpp`` falls back to; the fused path must agree with it."""
+    topk = ids.shape[1]
+    sorted_ids, offsets = nf12.moe_align(ids, experts)
+    h = nf12.moe_linear(x, w13q, offsets, gather=sorted_ids, gather_div=topk)
+    h = nf12.moe_silu_mul(h)
+    y = nf12.moe_linear(
+        h, w2q, offsets, scatter=sorted_ids, row_scale=weights.reshape(-1).float()
+    )
+    return nf12.moe_combine(y, topk)
+
+
+@pytest.mark.parametrize(
+    "k,inter,n,topk",
+    [
+        (1024, 2048, 1024, 1),
+        (2048, 3584, 2048, 2),
+        (4096, 4096, 4096, 2),
+        (4096, 1024, 4096, 4),
+    ],
+)
+@pytest.mark.parametrize("twin", [False, True])
+def test_fused_moe_single_token_matches_reference(twin, k, inter, n, topk):
+    """T == 1 takes the two-kernel fused route on ROCm, not the composed one."""
+    torch.manual_seed(14)
+    e = max(2, topk)
+    w13 = _bf16((e, 2 * inter, k), 0.02, 30)
+    w2 = _bf16((e, n, inter), 0.02, 31)
+    x = _bf16((1, k), 0.05, 32)
+    ids = torch.arange(topk, device="cuda", dtype=torch.int32).reshape(1, topk)
+    weights = torch.rand(1, topk, device="cuda", dtype=torch.float32)
+    w13q = nf12.pack_bf16t_moe(w13) if twin else nf12.encode_moe(w13)
+    w2q = nf12.pack_bf16t_moe(w2) if twin else nf12.encode_moe(w2)
+
+    got = nf12.fused_moe(x, w13q, w2q, weights, ids)
+    ref = reference.fused_moe(x, w13, w2, weights, ids)
+    assert got.shape == ref.shape
+    assert _violations(got, ref) == 0
+
+    # Equal to the composed route to FP32 reassociation, not bitwise: the fused
+    # kernel walks K with a different association order (the CUDA fused kernel
+    # does too, which is why SPEC.md 6.2 is a tolerance and not equality).
+    comp = _composed_moe(x, w13q, w2q, weights, ids, e)
+    assert _violations(got, comp.double()) == 0
+
+    again = nf12.fused_moe(x, w13q, w2q, weights, ids)
+    assert got.view(torch.int16).equal(again.view(torch.int16))
+
+
+@pytest.mark.parametrize("twin", [False, True])
+def test_fused_moe_single_token_dropped_ids(twin):
+    """A dropped assignment contributes exactly zero, including an all-dropped tile."""
+    torch.manual_seed(15)
+    e, k, inter, n, topk = 4, 2048, 4096, 2048, 2
+    w13 = _bf16((e, 2 * inter, k), 0.02, 40)
+    w2 = _bf16((e, n, inter), 0.02, 41)
+    x = _bf16((1, k), 0.05, 42)
+    weights = torch.rand(1, topk, device="cuda", dtype=torch.float32)
+    w13q = nf12.pack_bf16t_moe(w13) if twin else nf12.encode_moe(w13)
+    w2q = nf12.pack_bf16t_moe(w2) if twin else nf12.encode_moe(w2)
+
+    ids = torch.tensor([[0, -1]], device="cuda", dtype=torch.int32)
+    got = nf12.fused_moe(x, w13q, w2q, weights, ids)
+    ref = reference.fused_moe(x, w13, w2, weights, ids)
+    assert _violations(got, ref) == 0
+
+    dropped = torch.full((1, topk), -1, device="cuda", dtype=torch.int32)
+    zero = nf12.fused_moe(x, w13q, w2q, weights, dropped)
+    assert int((zero != 0).sum()) == 0
+
+
+@pytest.mark.parametrize("tokens", [2, 5])
+def test_fused_moe_multi_token_matches_reference(tokens):
+    """T > 1 keeps the composed route (the fused path is single-token only)."""
+    torch.manual_seed(16)
+    e, k, inter, n, topk = 4, 2048, 1024, 2048, 2
+    w13 = _bf16((e, 2 * inter, k), 0.02, 50)
+    w2 = _bf16((e, n, inter), 0.02, 51)
+    x = _bf16((tokens, k), 0.05, 52)
+    ids = torch.randint(0, e, (tokens, topk), device="cuda", dtype=torch.int32)
+    weights = torch.rand(tokens, topk, device="cuda", dtype=torch.float32)
+    w13q = nf12.encode_moe(w13)
+    w2q = nf12.encode_moe(w2)
+    got = nf12.fused_moe(x, w13q, w2q, weights, ids)
+    ref = reference.fused_moe(x, w13, w2, weights, ids)
+    assert _violations(got, ref) == 0
+
+
+def test_fused_moe_single_token_multi_stream_safe():
+    """Concurrent T == 1 calls must not share scratch: the fused path owns none."""
+    torch.manual_seed(17)
+    e, k, inter, n, topk = 4, 2048, 1024, 2048, 2
+    w13 = _bf16((e, 2 * inter, k), 0.02, 60)
+    w2 = _bf16((e, n, inter), 0.02, 61)
+    w13q = nf12.encode_moe(w13)
+    w2q = nf12.encode_moe(w2)
+    x = _bf16((1, k), 0.05, 62)
+    ids = torch.tensor([[0, 1]], device="cuda", dtype=torch.int32)
+    weights = torch.rand(1, topk, device="cuda", dtype=torch.float32)
+
+    serial = nf12.fused_moe(x, w13q, w2q, weights, ids)
+    torch.cuda.synchronize()
+    out = []
+    for _ in range(2):
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.default_stream())
+        with torch.cuda.stream(stream):
+            out.append(nf12.fused_moe(x, w13q, w2q, weights, ids))
+    torch.cuda.synchronize()
+    for got in out:
+        assert got.view(torch.int16).equal(serial.view(torch.int16))
