@@ -112,8 +112,9 @@ def test_linear_workspace_bytes(lib):
     dev = torch.cuda.current_device()
     assert lib.nf12_linear_workspace_bytes(0, 4096, 4096, dev) == 0
     assert lib.nf12_linear_workspace_bytes(-1, 4096, 4096, dev) == 0
-    assert lib.nf12_linear_workspace_bytes(1, 4096, 4096, -1) == 0
-    assert lib.nf12_linear_workspace_bytes(1, 4096, 4096, torch.cuda.device_count()) == 0
+    for m in (1, 16, 272):
+        assert lib.nf12_linear_workspace_bytes(m, 4096, 4096, -1) == 0
+        assert lib.nf12_linear_workspace_bytes(m, 4096, 4096, torch.cuda.device_count()) == 0
     # Valid queries are pure functions of their arguments.
     for m, n, k in [(1, 4096, 4096), (16, 1024, 16384), (512, 4096, 4096)]:
         a = lib.nf12_linear_workspace_bytes(m, n, k, dev)

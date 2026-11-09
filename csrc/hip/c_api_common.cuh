@@ -47,6 +47,11 @@ inline nf12_status_t status(hipError_t err) {
   }
 }
 
+inline bool valid_device(int device) {
+  int count = 0;
+  return device >= 0 && hipGetDeviceCount(&count) == hipSuccess && device < count;
+}
+
 inline bool aligned(const void* p, uintptr_t bytes) {
   return (reinterpret_cast<uintptr_t>(p) & (bytes - 1)) == 0;
 }

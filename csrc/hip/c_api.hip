@@ -109,8 +109,8 @@ nf12_status_t nf12_decode(const nf12_weight_t* w, void* out_bf16, int64_t ldo, c
                                 out_bf16, ldo, stream));
 }
 
-size_t nf12_linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int) {
-  if (m <= 0 || !valid_shape(n, k)) return 0;
+size_t nf12_linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int device) {
+  if (m <= 0 || !valid_shape(n, k) || !nf12_hip_capi::valid_device(device)) return 0;
   // Splits depend on M: a short tail can need more workspace than a full
   // chunk. Reserve the maximum before launching anything (CUDA ABI contract).
   const int64_t cap = nf12_hip_wmma_max_m();
@@ -169,7 +169,8 @@ nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12
 // Above the matrix-core crossover ops.cpp decodes slices and calls torch's
 // GEMM, so no HIP GEMM is needed here.
 int64_t nf12_linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, int device) {
-  if (m <= 0 || m > std::numeric_limits<int32_t>::max() || !valid_shape(n, k)) return 0;
+  if (m <= 0 || m > std::numeric_limits<int32_t>::max() || !valid_shape(n, k) ||
+      !nf12_hip_capi::valid_device(device)) return 0;
   // The fused small-M route runs on every supported arch.
   if (m < 16) return 0;
   // The matrix-core route needs wmma-128b-insts. Without it (gfx1250) the op
