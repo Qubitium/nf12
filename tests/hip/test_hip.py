@@ -7,9 +7,9 @@ Validated on ROCm 10.1.0 / HIP 7.16.26385 (R9700); see README.md here.
 These tests drive the plain C API in ``include/nf12/nf12_hip.h`` through ctypes. Accuracy uses the same
 ``|err| <= 2e-3 + 2e-3*|ref|`` gate as the CUDA tests.
 
-The primary contract test is against a BF16 twin (SPEC.md section 6.2): NF12
-adds zero error relative to a BF16 GEMM on the exactly-decoded weight. The FP64
-oracle is kept as a tighter secondary check.
+The primary contract is exact equality with the matched BF16t kernel
+(SPEC.md section 6.2). A separate dense BF16 GEMM check allows the normal
+accumulation-order differences of section 6.3.
 """
 
 from __future__ import annotations
@@ -97,6 +97,14 @@ def lib():
     lib.nf12_hip_linear_wmma.argtypes = [
         _VOID, _VOID, _U8, _VOID, _VOID, _I64, _I64, _I64, _VOID,
         _VOID, _SIZE, _VOID,
+    ]
+    lib.nf12_hip_linear_fused_bf16t.restype = _INT
+    lib.nf12_hip_linear_fused_bf16t.argtypes = [
+        _VOID, _VOID, _VOID, _I64, _I64, _I64, _VOID, _VOID,
+    ]
+    lib.nf12_hip_linear_wmma_bf16t.restype = _INT
+    lib.nf12_hip_linear_wmma_bf16t.argtypes = [
+        _VOID, _VOID, _VOID, _I64, _I64, _I64, _VOID, _VOID, _SIZE, _VOID,
     ]
     # The CUDA-named C ABI, so the ROCm status codes can be compared with the
     # CUDA build's (csrc/api.cu) rather than only with the HIP-level ones.
@@ -260,19 +268,36 @@ def test_decode_is_bit_exact(lib):
     assert torch.equal(got.view(torch.int16), w.view(torch.int16))
 
 
+def _twin_linear(lib, x, weight):
+    m, k = x.shape
+    n = weight.shape[0]
+    twin = nf12.pack_bf16t(weight)
+    out = torch.empty((m, n), device=x.device, dtype=torch.bfloat16)
+    args = (twin.data_ptr(), x.data_ptr(), out.data_ptr(), n, k, m, None)
+    if m < 16:
+        assert lib.nf12_hip_linear_fused_bf16t(*args, _stream()) == 0
+    else:
+        need = lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m)
+        workspace = torch.empty(max(need, 1), device=x.device, dtype=torch.uint8)
+        assert lib.nf12_hip_linear_wmma_bf16t(*args, workspace.data_ptr(), need, _stream()) == 0
+    return out
+
+
 @pytest.mark.parametrize("n,k", [(256, 256), (1024, 4096)])
 @pytest.mark.parametrize("m", [1, 4, 15])
-def test_fused_linear_matches_fp64_oracle(lib, n, k, m):
+def test_fused_linear_matches_bf16t_exactly(lib, n, k, m):
     torch.manual_seed(m)
     w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
     x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
     packed, escapes, exp_base = _encode(lib, w)
-    ref = x.double() @ w.double().t()
-    assert _violations(_linear(lib, x, packed, escapes, exp_base), ref) == 0
+    ref = _twin_linear(lib, x, w)
+    got = _linear(lib, x, packed, escapes, exp_base)
+    assert bool(torch.isfinite(got).all())
+    assert torch.equal(got.view(torch.int16), ref.view(torch.int16))
 
 
 @pytest.mark.parametrize("m", [16, 17, 32, 64, 128, 256])
-def test_wmma_linear_matches_fp64_oracle(lib, m):
+def test_wmma_linear_matches_bf16t_exactly(lib, m):
     if lib.nf12_hip_wmma_supported(m) == 0:
         pytest.skip(f"wmma path not available for m={m}")
     torch.manual_seed(m)
@@ -280,17 +305,15 @@ def test_wmma_linear_matches_fp64_oracle(lib, m):
     w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
     x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
     packed, escapes, exp_base = _encode(lib, w)
-    ref = x.double() @ w.double().t()
-    assert _violations(_linear(lib, x, packed, escapes, exp_base), ref) == 0
+    ref = _twin_linear(lib, x, w)
+    got = _linear(lib, x, packed, escapes, exp_base)
+    assert bool(torch.isfinite(got).all())
+    assert torch.equal(got.view(torch.int16), ref.view(torch.int16))
 
 
 @pytest.mark.parametrize("m", [1, 4, 15])
-def test_fused_linear_matches_bf16_twin(lib, m):
-    """SPEC.md 6.2: the contract is BF16-in/BF16-out, not an FP64 ideal.
-
-    The twin is a BF16 GEMM over the exactly-decoded weight, i.e. the same
-    numbers the caller would get from ``decode`` + ``F.linear``.
-    """
+def test_fused_linear_matches_dense_bf16(lib, m):
+    """SPEC.md 6.3: secondary comparison against a dense BF16 GEMM."""
     torch.manual_seed(m)
     n, k = 1024, 4096
     w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
@@ -303,8 +326,8 @@ def test_fused_linear_matches_bf16_twin(lib, m):
 
 
 @pytest.mark.parametrize("m", [16, 17, 32, 64, 128, 256])
-def test_wmma_linear_matches_bf16_twin(lib, m):
-    """SPEC.md 6.2 contract for the matrix-core route."""
+def test_wmma_linear_matches_dense_bf16(lib, m):
+    """SPEC.md 6.3: secondary dense BF16 check of the matrix-core route."""
     if lib.nf12_hip_wmma_supported(m) == 0:
         pytest.skip(f"wmma path not available for m={m}")
     torch.manual_seed(m)
