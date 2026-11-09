@@ -126,10 +126,10 @@ def test_native_grouped_operands_rejects_invalid_buffers(abi, ldx, ldo, count):
     assert bool((out == -7).all()) and bool((ends == -7).all())
 
 
-@pytest.mark.parametrize("count", [524256, 524272, 1048544, 1048560])
+@pytest.mark.parametrize("count", [524256, 524272, 1048544, 1048545, 1048560, 2097120])
 def test_moe_wmma_grid_y_boundary(abi, count):
-    # One expert reserves ceil(count / 16) + 1 CTAs. Cover the former
-    # 32767-block ceiling, the true 65535 ceiling, and rejection above it.
+    # Routed tiles spill from grid.y into grid.z. Cross both old Y ceilings
+    # and the second Z plane, including a one-row tail.
     n, k = 16, 64
     w = torch.ones((1, n, k), device="cuda", dtype=torch.bfloat16)
     nw = nf12.encode_moe(w)
@@ -151,15 +151,26 @@ def test_moe_wmma_grid_y_boundary(abi, count):
     with ThreadPoolExecutor(max_workers=1) as pool:
         rc = pool.submit(launch).result()
     torch.cuda.synchronize()
-    if (count + 15) // 16 + 1 > 65535:
-        assert rc == 2  # NF12_ERROR_UNSUPPORTED; no launch or output writes.
-        assert bool((guarded == -7).all())
-    else:
-        assert rc == 0
-        twin = nf12.moe_linear(x, nf12.pack_bf16t_moe(w), offsets)
-        assert bool((out == k).all())  # Independent exact result for all-one inputs.
-        assert torch.equal(out.view(torch.int16), twin.view(torch.int16))
-        assert bool((guarded[[0, -1]] == -7).all())
+    assert rc == 0
+    twin = nf12.moe_linear(x, nf12.pack_bf16t_moe(w), offsets)
+    assert bool((out == k).all())  # Independent exact result for all-one inputs.
+    assert torch.equal(out.view(torch.int16), twin.view(torch.int16))
+    assert bool((guarded[[0, -1]] == -7).all())
+    if count == 1048545:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            launch_stream = stream.cuda_stream
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            assert abi.nf12_moe_linear(x.data_ptr(), k, None, 1, None, offsets.data_ptr(), count,
+                                      C.byref(cw), None, out.data_ptr(), n, None, 0, launch_stream) == 0
+        with torch.cuda.stream(stream):
+            x.fill_(2.)
+            graph.replay()
+            assert bool((out == 2 * k).all())
+            assert bool((guarded[[0, -1]] == -7).all())
+        stream.synchronize()
 
 
 @pytest.mark.parametrize("offsets", [

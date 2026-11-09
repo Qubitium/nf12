@@ -151,7 +151,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // This CTA owns tokens [m0, m0 + kMt*16). kMt is chosen from M so one block
   // covers the caller's whole M and the packed weight is read exactly once.
   //
-  // Routed: blockIdx.y indexes the flattened (expert, 16-row tile) space. The
+  // Routed: grid.y/z index the flattened (expert, 16-row tile) space. The
   // tile count is device-side (per-expert counts are device-only), so a CTA
   // scans the offsets and exits when it is past the last expert. CTAs beyond the
   // scanned count are free: they return before touching memory.
@@ -159,7 +159,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   int64_t m0 = int64_t(blockIdx.y) * (kMt * 16);
   WmmaRoute route = route_in;
   if constexpr (kRouted) {
-    int64_t rem = int64_t(blockIdx.y);
+    int64_t rem = int64_t(blockIdx.z) * gridDim.y + blockIdx.y;
     int64_t start = 0, rows = 0;
     int64_t lo = moe_next_offset(route.expert_offsets[0], 0, route.max_assignments);
     int32_t e = 0;
@@ -227,7 +227,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // Slices are whole super-atoms (64 k each) and contiguous, so each split
   // still walks a valid prefix of the plane layout.
   const int64_t per = (k_blocks + kSplits - 1) / kSplits;
-  const int64_t kb_lo = int64_t(blockIdx.z) * per;
+  const int64_t kb_lo = kRouted ? 0 : int64_t(blockIdx.z) * per;
   const int64_t kb_hi = min(k_blocks, kb_lo + per);
   // Two buffers per warp when kDbl. Decoding into the idle buffer while the
   // busy one is consumed removes the barrier between the store and the first
@@ -758,7 +758,7 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
 }
 
 // Routed (mixture-of-experts) linear. One CTA per (expert, 16-row weight block,
-// 16-assignment tile), so blockIdx.y enumerates the flattened (expert, tile)
+// 16-assignment tile), so grid.y/z enumerate the flattened (expert, tile)
 // space. The tile count is device-side because per-expert counts are, so the
 // grid is the worst-case bound and surplus CTAs return before touching memory.
 // `out` rows are ldy apart; `x` rows are ldx apart.
@@ -777,7 +777,9 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
   const int64_t m_tiles = (max_assignments + 15) / 16 + num_experts;
   if (n_blocks == 0) return hipSuccess;
-  if (n_blocks > kMaxWmmaGridX || m_tiles > kMaxWmmaGridY) return hipErrorNotSupported;
+  const int64_t grid_y = std::min(m_tiles, kMaxWmmaGridY);
+  const int64_t grid_z = (m_tiles + grid_y - 1) / grid_y;
+  if (n_blocks > kMaxWmmaGridX || grid_z > kMaxWmmaGridY) return hipErrorNotSupported;
 
   WmmaRoute route{};
   route.gather = gather;
@@ -794,7 +796,8 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
                              SourceTraits<Src>::kVecs;
   route.num_experts = num_experts;
 
-  const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_tiles), 1);
+  const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(grid_y),
+                  static_cast<unsigned>(grid_z));
   // One tile per CTA: the assignment axis is the scarce one in MoE, and a
   // single tile keeps the VGPR budget low enough for several CTAs per CU.
   wmma_kernel<Src, true, 1, 1, false, false><<<grid, kThreadsPerBlock, 0, stream>>>(
