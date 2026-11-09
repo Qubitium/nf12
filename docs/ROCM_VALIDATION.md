@@ -9,7 +9,7 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 623 | 12 | 1 |
+| HIP + shared API | R9700 | 647 | 12 | 1 |
 | Shared API | RTX 4090 | 447 | 13 | 1 |
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
@@ -75,7 +75,7 @@ context. All three confirmed findings are fixed:
   All 1581056 output elements match the NF12 C-API twin bitwise; all outputs
   are finite and guards are unchanged.
 
-The current PR suites above passed in 27.45 s (HIP) and 68.27 s (CUDA), with
+The current PR suites above passed in 28.25 s (HIP) and 74.53 s (CUDA), with
 GIL disabled and two visible devices. The benchmark/device selection fix does
 not establish new performance numbers for the canonical shape grid.
 
@@ -85,11 +85,47 @@ and two GPUs, the full suites passed with **zero deselections**:
 
 | Suite with PR #7 test correction | Device | Passed | Skipped | Seconds |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 635 | 12 | 25.98 |
-| Shared API | RTX 4090 | 459 | 13 | 20.04 |
+| HIP + shared API | R9700 | 659 | 12 | 26.26 |
+| Shared API | RTX 4090 | 459 | 13 | 20.23 |
 
 PR #7 remains separate; these integration results do not claim the unchanged
 reference-tolerance test passes in PR #3 alone.
+
+### Native MoE bounds follow-up
+
+A further pair of fresh-context agents reviewed `c6c4da0`. No new concurrency
+issue was confirmed: 1280 concurrent dense calls and 840 graph replays with
+2840 output comparisons passed on gfx1201 and SM89 with GIL disabled.
+The independent correctness probes included 468 exact linear/twin cases and
+121 explicit codec bases per backend; CUDA base/head fingerprints matched.
+No race sanitizer, SM90+ hardware, or large-allocation opt-in tests were run.
+
+The correctness review found missing validation in native HIP MoE decode and
+SiLU. The fixed native entry points also validate the adjacent combine and
+gather buffers. Shape/alignment helpers are shared with the C ABI. Twenty-four
+new cases verify slice limits, row strides, alignment and overflow rejection,
+with **zero output/guard writes**. A 16-row slice starting at N now returns
+`hipErrorInvalidValue` instead of reading the trailing encoded matrix. SiLU
+with output stride zero now returns that error instead of overwriting output.
+
+The source-only wheel retains all 78 required source files byte-for-byte,
+including `csrc/validation.h`, and contains no compiled libraries. Before the
+bounds fix, installed-wheel JIT probes on both backends passed all 65536 BF16
+bit patterns and 78080 exact twin elements each. Packed bytes (98304), escapes
+(131072 bytes), and exponent base matched across CUDA and HIP.
+
+R9700 valid-call A/B against `c6c4da0`: same-process interleaved calls, 20 warmups,
+101 host-call samples and 15 event-timed groups of 50 launches per version.
+The event loop includes host submission gaps. Medians in microseconds;
+all outputs were bitwise equal. The largest host increase was 0.030 us;
+timing differences below are measurements, not claims of kernel speedups.
+
+| Operation | Shape | Host before | Host after | Event-loop before | Event-loop after |
+| --- | --- | ---: | ---: | ---: | ---: |
+| silu_mul | rows=128, inter=4096 | 2.654 | 2.664 | 15.088 | 15.283 |
+| combine | tokens=128, topk=8, N=4096 | 2.724 | 2.754 | 14.780 | 14.789 |
+| decode | E=4, N=256, K=512 | 3.556 | 3.575 | 4.434 | 4.450 |
+| grouped_operands | assignments=512, E=4, K=4096 | 3.275 | 3.295 | 14.398 | 14.131 |
 
 ## Large-batch fallback
 

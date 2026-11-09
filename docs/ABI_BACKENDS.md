@@ -50,12 +50,12 @@ MoE C++ boundary also retains its existing interface and implementations.
 - Existing suites cover exact BF16t outputs, packed bytes, padded strides,
   invalid/empty inputs, workspace bounds, streams, GIL=0 and graph replay.
 
-The bridge shrinks from 975 to 856 lines across its implementation and private
+The bridge shrinks from 975 to 866 lines across its implementation and private
 headers. The backend-specific copies of public validation and entry points are
 removed. The native HIP BF16t compatibility entry point also uses the shared
 validation and chunk dispatcher, translating its status back to `hipError_t`.
 
-Validation on the final shared frontend: **623 passed** on R9700 and **447
+Validation on the final shared frontend: **647 passed** on R9700 and **447
 passed** on RTX 4090, using GIL=0 and two visible devices. There were 12/13
 backend-dependent skips respectively, plus the known PR #7 case deselected
 in both runs. All four new ABI contract tests ran on both backends.
