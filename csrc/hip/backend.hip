@@ -50,11 +50,24 @@ cudaError_t pack_bf16t(const void* w, int64_t n, int64_t k, int64_t ldw,
   return nf12_hip::pack_bf16t(w, n, k, ldw, out, stream);
 }
 
-size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int) {
+// M band the fused CDNA3 GEMM covers. Above it the M blocks re-read the packed
+// weight, and decode-once + rocBLAS is faster again.
+constexpr int64_t kMfmaFusedM = 64;
+
+size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int device) {
   // A tail can require a larger split plane than the full M chunk.
   const int64_t cap = nf12_hip_wmma_max_m();
-  return std::max(nf12_hip_linear_wmma_workspace_bytes(n, k, std::min(m, cap)),
-                  nf12_hip_linear_wmma_workspace_bytes(n, k, m % cap));
+  const size_t wmma = std::max(nf12_hip_linear_wmma_workspace_bytes(n, k, std::min(m, cap)),
+                               nf12_hip_linear_wmma_workspace_bytes(n, k, m % cap));
+  if (nf12_hip::device_traits(device).matrix == nf12_hip::MatrixCore::kMfma) {
+    // The fused route stages no decoded weight; it only needs the FP32 partial
+    // plane when K is split across CTAs. Above kMfmaFusedM the torch op takes
+    // the decode route, so the wider of the two must be available.
+    const int splits = nf12_hip::mfma_dense_splits(m, n, k);
+    const size_t part = splits > 1 ? size_t(m) * size_t(n) * size_t(splits) * sizeof(float) : 0;
+    return m <= kMfmaFusedM ? part : std::max(wmma, part);
+  }
+  return wmma;
 }
 
 // Which linear route this device takes. Trait-driven: RDNA4 waves take the
@@ -80,8 +93,8 @@ cudaError_t linear(const LinearArgs& a) {
                                             a.stream);
     }
     return nf12_hip::linear_mfma_strided(a.weight, static_cast<const uint4*>(a.escapes), a.exp_base,
-                                         a.x, a.y, a.n, a.k, a.m, a.bias, a.ldx, a.ldy, twin,
-                                         a.stream);
+                                         a.x, a.y, a.n, a.k, a.m, a.bias, a.ldx, a.ldy,
+                                         a.workspace, a.workspace_bytes, twin, a.stream);
   }
   // The RDNA4 matrix-core route keeps its own M chunking. It reports
   // hipErrorNotSupported when the device lacks wmma-128b-insts, and the fused
@@ -121,17 +134,19 @@ int64_t linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, int device) {
   //  - RDNA4 (kWmma) waves are narrow and few, so the fused WMMA kernel keeps
   //    the packed weight in registers and never materialises a decoded tile.
   //    It covers all M up to its own cap.
-  //  - CDNA3 (kMfma) waves are twice as wide on ~10x the CUs, and its fused
-  //    kernel is bandwidth-bound on the activation re-read (every 16-column
-  //    stripe re-reads all of x). The native-speed route on that shape is the
-  //    decode-once + rocBLAS route the CUDA build also uses above its own
-  //    crossover, so CDNA3 takes it. The fused MFMA kernel remains the exact
-  //    bf16t twin and the C-API path (SPEC.md 6.2).
+  //  - CDNA3 (kMfma) splits K across the CTA's waves (mfma_split_kernel), so
+  //    the fused route keeps the packed weight resident and never materialises
+  //    a decoded copy. That halves the bytes read against a BF16 GEMM, which is
+  //    the only way to stay ahead of rocBLAS on a bandwidth-bound part. Above
+  //    kMfmaFusedM the M blocks re-read the packed weight, so the decode-once +
+  //    rocBLAS route wins again.
   constexpr int64_t kSmallM = 64;
   if (mc == nf12_hip::MatrixCore::kNone) {
     // No matrix core: only the fused m < 16 kernel exists, so everything above
     // it must decode first (this is the pre-existing fallback route).
     if (m < 16) return 0;
+  } else if (mc == nf12_hip::MatrixCore::kMfma) {
+    if (m <= kMfmaFusedM) return 0;
   } else if (m <= kSmallM) {
     return 0;
   }

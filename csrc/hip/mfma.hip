@@ -104,7 +104,7 @@ __device__ __forceinline__ void decode_tile(const uint4* __restrict__ packed,
 
 // One lane's 4-BF16 window of an activation row. row = lane%16 (the M index),
 // k = 4*(lane/16) + i, i.e. contiguous in K.
-__device__ __forceinline__ MfmaA load_a_dense(const __hip_bfloat16* __restrict__ x, int64_t ldx,
+[[maybe_unused]] __device__ __forceinline__ MfmaA load_a_dense(const __hip_bfloat16* __restrict__ x, int64_t ldx,
                                               int64_t row, int64_t k) {
   const int lane = threadIdx.x % kWave;
   const int64_t off = row * ldx + k + 4 * (lane / 16);
@@ -272,12 +272,201 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
+// ---------------------------------------------------------------------------
+// Dense fused GEMM.
+//
+// Two costs dominate on a 304-CU part:
+//
+//  * Parallelism. One 16-column tile per CTA exposes only n/16 CTAs (256 at
+//    n = 4096), and a wave that walks all k/64 super-atoms serially is latency
+//    bound. A CTA here owns kCols column tiles (one wave each) and the grid
+//    splits K across kSplits CTAs, which together fill the machine.
+//
+//  * Activation re-reads. A CTA covering one 16-column tile re-reads the whole
+//    activation matrix once per tile, so at m = 64 the activations cost 16x the
+//    packed weight and the kernel is nowhere near its byte floor. Staging the
+//    activation block in shared memory once per K step, coalesced and shared by
+//    every wave of the CTA, divides that traffic by kCols.
+//
+// The packed weight is still never materialised: each wave decodes only its own
+// 16-column stripe. With kSplits == 1 the FP32 result is rounded to BF16 once,
+// exactly as before; with more splits each CTA writes an FP32 partial and
+// mfma_reduce_kernel sums them in split order, so the result is deterministic.
+// ---------------------------------------------------------------------------
+// Activation staging stride: 16-byte aligned so the coalesced copy is a uint4
+// store, and an odd multiple of 8 BF16 so the 16 weight rows of a fragment land
+// on alternating bank halves instead of one.
+constexpr int kXStride = kSuperAtomCols + 8;
+
+// Token tiles per CTA. Above four the activation staging and the accumulator
+// array stop fitting in a CTA that keeps a second resident slot, and the extra
+// packed-weight re-read that grid.y splitting costs is smaller than the loss.
+constexpr int kFusedTiles = 4;
+
+template <WeightSource S, int kMt, int kCols>
+__global__ void __launch_bounds__(kWave * kCols)
+    mfma_tile_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
+                     const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n, int64_t k,
+                     int64_t m_rows, __hip_bfloat16* __restrict__ out,
+                     const __hip_bfloat16* __restrict__ bias, int64_t ldx, int64_t ldy,
+                     float* __restrict__ partial) {
+  const int lane = threadIdx.x % kWave;
+  const int wave = threadIdx.x / kWave;
+  const int lo = lane % 16;   // output column inside the 16-wide tile
+  const int quad = lane / 16; // 0..3, K group inside a 16-K chunk
+
+  const int64_t n0 = int64_t(blockIdx.x) * (kCols * kSuperAtomRows) + wave * kSuperAtomRows;
+  if (n0 >= n) return;
+  const int64_t m0 = int64_t(blockIdx.y) * (kMt * 16);
+  if (m0 >= m_rows) return;
+
+  __shared__ __align__(16) __hip_bfloat16 xs[kMt * kSuperAtomRows * kXStride];
+  __shared__ __align__(16) __hip_bfloat16 tile[kCols][kSuperAtomRows * kTileRowStride];
+
+  // Per-tile activation row origin. A partial tail tile reuses the last full
+  // 16-row window, so it can never read past `x`; the epilogue drops the rows
+  // outside that tile's own disjoint range.
+  int64_t a_origin[kMt];
+#pragma unroll
+  for (int t = 0; t < kMt; ++t)
+    a_origin[t] = std::max(int64_t(0), std::min(m0 + int64_t(t) * 16, m_rows - 16));
+
+  const int64_t k_blocks = k / kSuperAtomCols;
+  const int64_t per = (k_blocks + gridDim.z - 1) / gridDim.z;
+  const int64_t kb_begin = int64_t(blockIdx.z) * per;
+  const int64_t kb_end = std::min(k_blocks, kb_begin + per);
+
+  MfmaD acc[kMt];
+#pragma unroll
+  for (int t = 0; t < kMt; ++t) acc[t] = MfmaD{0.0f, 0.0f, 0.0f, 0.0f};
+
+  const int dlane = lane & 31;
+  const bool decode_pass = lane < 32;
+  const int nthreads = kWave * kCols;
+  const int b_row = (lane % 16) * kTileRowStride + 4 * quad;
+  const int a_col = (lane % 16) * kXStride + 4 * quad;
+  __hip_bfloat16* const sh = &tile[wave][0];
+
+  for (int64_t kb = kb_begin; kb < kb_end; ++kb) {
+    // Stage this K block of every token tile once, 16 B per thread and fully
+    // coalesced, while this wave decodes its own column stripe.
+    // Unrolled over the token tiles: a runtime tile index turns `a_origin[t]`
+    // into a dynamically indexed array, and the compiler replaces it with a
+    // select chain per staged chunk.
+    const int64_t kb_off = kb * kSuperAtomCols;
+#pragma unroll
+    for (int t = 0; t < kMt; ++t) {
+      const __hip_bfloat16* srcb = x + a_origin[t] * ldx + kb_off;
+      __hip_bfloat16* dstb = &xs[t * kSuperAtomRows * kXStride];
+      for (int i = threadIdx.x; i < kSuperAtomRows * 8; i += nthreads) {
+        const int rr = i >> 3;
+        const int c = (i & 7) * 8;
+        *reinterpret_cast<uint4*>(dstb + rr * kXStride + c) =
+            *reinterpret_cast<const uint4*>(srcb + rr * ldx + c);
+      }
+    }
+    if (decode_pass) {
+      const int64_t sa = (n0 / kSuperAtomRows) * k_blocks + kb;
+      decode_tile<S>(packed, escapes, base_x4, sa, dlane, sh);
+    }
+    __syncthreads();
+
+    // Every fragment for this K block is loaded before the first MFMA: left
+    // interleaved the compiler waits on each 8-byte load immediately before the
+    // MFMA that consumes it and exposes the full latency sixteen times a step.
+    MfmaA bf[4];
+    MfmaA af[kMt][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) bf[j] = *reinterpret_cast<const MfmaA*>(sh + b_row + 16 * j);
+#pragma unroll
+    for (int t = 0; t < kMt; ++t) {
+      const __hip_bfloat16* arow = &xs[t * kSuperAtomRows * kXStride + a_col];
+#pragma unroll
+      for (int j = 0; j < 4; ++j) af[t][j] = *reinterpret_cast<const MfmaA*>(arow + 16 * j);
+    }
+#pragma unroll
+    for (int t = 0; t < kMt; ++t) {
+#pragma unroll
+      for (int j = 0; j < 4; ++j) acc[t] = mfma(af[t][j], bf[j], acc[t]);
+    }
+    __syncthreads();
+  }
+
+  // Epilogue. One K split writes the result directly; more than one writes an
+  // FP32 partial plane for mfma_reduce_kernel.
+  float* const pdst =
+      partial != nullptr ? partial + int64_t(blockIdx.z) * (int64_t(m_rows) * n) : nullptr;
+  const float bias_v = (bias != nullptr) ? __bfloat162float(bias[n0 + lo]) : 0.0f;
+#pragma unroll
+  for (int t = 0; t < kMt; ++t) {
+    const int64_t lo_row = m0 + int64_t(t) * 16;
+    if (lo_row >= m_rows) break;
+    const int64_t hi_row = std::min(lo_row + 16, m_rows);
+    const int64_t origin = a_origin[t];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const int64_t row = origin + 4 * quad + i;
+      if (row < lo_row || row >= hi_row) continue;
+      if (pdst != nullptr) {
+        pdst[row * n + n0 + lo] = acc[t][i];
+      } else {
+        out[row * ldy + n0 + lo] = __float2bfloat16(acc[t][i] + bias_v);
+      }
+    }
+  }
+}
+
+// Sums the per-split FP32 planes in ascending split order and applies bias
+// before the single BF16 rounding. Split order, not atomic order, so the result
+// is bit-identical from run to run.
+__global__ void mfma_reduce_kernel(const float* __restrict__ partial, int64_t total, int splits,
+                                   int64_t n, const __hip_bfloat16* __restrict__ bias,
+                                   __hip_bfloat16* __restrict__ out, int64_t ldy) {
+  for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < total;
+       i += int64_t(gridDim.x) * blockDim.x) {
+    float s = partial[i];
+    for (int j = 1; j < splits; ++j) s += partial[int64_t(j) * total + i];
+    if (bias != nullptr) s += __bfloat162float(bias[i % n]);
+    out[(i / n) * ldy + i % n] = __float2bfloat16(s);
+  }
+}
+
+// Launch shape for the dense route. A pure function of the problem so the
+// workspace query and the launcher can never disagree about the split count.
+struct MfmaPlan {
+  int kCols;
+  int kMt;
+  int kSplits;
+  int64_t mBlocks;
+  int64_t nGroups;
+};
+
+inline MfmaPlan mfma_plan(int64_t m, int64_t n, int64_t k) {
+  (void)k;
+  MfmaPlan p{};
+  const int64_t n_tiles = n / kSuperAtomRows;
+  const int tiles = static_cast<int>((m + 15) / 16);
+  p.kCols = (n_tiles % 4 == 0) ? 4 : 1;
+  p.kMt = tiles < kFusedTiles ? tiles : kFusedTiles;
+  p.mBlocks = (m + p.kMt * 16 - 1) / (p.kMt * 16);
+  p.nGroups = n_tiles / p.kCols;
+  // Two CTAs per CU is enough to keep the memory pipe busy; stop there rather
+  // than paying for more partial planes than the machine can use.
+  constexpr int64_t kTargetCtas = 2 * 304;
+  // Two CTAs per CU is enough to keep the memory pipe busy. A wide N already
+  // supplies the CTAs, so it takes fewer K splits and a smaller partial plane.
+  p.kSplits = (p.nGroups >= 128) ? 4 : 8;
+  while (p.kSplits > 1 && p.nGroups * p.mBlocks * p.kSplits > 2 * kTargetCtas) p.kSplits /= 2;
+  return p;
+}
+
 // Dense launcher: [m, n] from [m, k]. M is split across grid.y above one CTA's
 // tile budget, exactly like the RDNA4 chunking in backend.hip.
 template <WeightSource S>
 hipError_t linear_launch(const uint8_t* packed, const uint4* escapes, uint32_t exp_base, const void* x,
                          void* out, int64_t n, int64_t k, int64_t m, const void* bias,
-                         int64_t ldx, int64_t ldy, hipStream_t stream) {
+                         int64_t ldx, int64_t ldy, void* workspace, size_t workspace_bytes,
+                         hipStream_t stream) {
   if constexpr (S == WeightSource::kNf12) {
     if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   }
@@ -288,34 +477,55 @@ hipError_t linear_launch(const uint8_t* packed, const uint4* escapes, uint32_t e
   // the caller routes that band to the fused GEMV instead.
   if (m < 16) return hipErrorInvalidValue;
   const int64_t n_tiles = n / kSuperAtomRows;
-  const int64_t n_blocks = (n_tiles + kWavesPerBlock - 1) / kWavesPerBlock;
   const int tiles = static_cast<int>((m + 15) / 16);
-  if (n_blocks == 0 || tiles == 0) return hipSuccess;
-  const int mt = tiles < kMaxTiles ? tiles : kMaxTiles;
-  const int64_t m_blocks = (m + mt * 16 - 1) / (mt * 16);
-  if (n_blocks > kMaxGridX || m_blocks > kMaxGridY) return hipErrorNotSupported;
-
-  const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_blocks), 1);
-  MfmaRoute route{};
-  route.ldx = ldx;
-  route.ldy = ldy;
-
-#define NF12_MFMA_LAUNCH(T)                                                              \
-  mfma_kernel<S, false, T><<<grid, kThreads, 0, stream>>>(                               \
-      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), \
-      escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),    \
-      reinterpret_cast<const __hip_bfloat16*>(bias), route)
-  switch (mt) {
-    case 1: NF12_MFMA_LAUNCH(1); break;
-    case 2: NF12_MFMA_LAUNCH(2); break;
-    case 3: NF12_MFMA_LAUNCH(3); break;
-    case 4: NF12_MFMA_LAUNCH(4); break;
-    case 5: NF12_MFMA_LAUNCH(5); break;
-    case 6: NF12_MFMA_LAUNCH(6); break;
-    case 7: NF12_MFMA_LAUNCH(7); break;
-    default: NF12_MFMA_LAUNCH(kMaxTiles); break;
+  if (n_tiles == 0 || tiles == 0) return hipSuccess;
+  const MfmaPlan plan = mfma_plan(m, n, k);
+  if (plan.nGroups > kMaxGridX || plan.mBlocks > kMaxGridY || plan.kSplits > kMaxGridY) {
+    return hipErrorNotSupported;
   }
-#undef NF12_MFMA_LAUNCH
+
+  const int64_t total = m * n;
+  float* partial = nullptr;
+  if (plan.kSplits > 1) {
+    if (workspace == nullptr || workspace_bytes < size_t(total) * plan.kSplits * sizeof(float)) {
+      return hipErrorInvalidValue;
+    }
+    partial = static_cast<float*>(workspace);
+  }
+
+  const dim3 grid(static_cast<unsigned>(plan.nGroups), static_cast<unsigned>(plan.mBlocks),
+                  static_cast<unsigned>(plan.kSplits));
+  const auto* xb = reinterpret_cast<const __hip_bfloat16*>(x);
+  const auto* pb = reinterpret_cast<const uint4*>(packed);
+  auto* yb = reinterpret_cast<__hip_bfloat16*>(out);
+  const auto* bb = reinterpret_cast<const __hip_bfloat16*>(bias);
+  const uint32_t bx4 = exp_base_x4(exp_base);
+
+#define NF12_MFMA_TILE(MT, KC)                                                             \
+  mfma_tile_kernel<S, MT, KC><<<grid, kWave * KC, 0, stream>>>(xb, pb, escapes, bx4, n, k,  \
+                                                               m, yb, bb, ldx, ldy, partial)
+#define NF12_MFMA_COLS(MT)          \
+  do {                              \
+    if (plan.kCols == 4)            \
+      NF12_MFMA_TILE(MT, 4);        \
+    else                            \
+      NF12_MFMA_TILE(MT, 1);        \
+  } while (0)
+  switch (plan.kMt) {
+    case 1: NF12_MFMA_COLS(1); break;
+    case 2: NF12_MFMA_COLS(2); break;
+    case 3: NF12_MFMA_COLS(3); break;
+    default: NF12_MFMA_COLS(kFusedTiles); break;
+  }
+#undef NF12_MFMA_COLS
+#undef NF12_MFMA_TILE
+  if (plan.kSplits > 1) {
+    constexpr int kReduceThreads = 256;
+    int64_t blocks = (total + kReduceThreads - 1) / kReduceThreads;
+    if (blocks > kMaxGridX) blocks = kMaxGridX;
+    mfma_reduce_kernel<<<static_cast<unsigned>(blocks), kReduceThreads, 0, stream>>>(
+        partial, total, plan.kSplits, n, bb, yb, ldy);
+  }
   return hipGetLastError();
 }
 
@@ -361,15 +571,22 @@ hipError_t moe_launch(const uint8_t* packed, const uint4* escapes, const int64_t
 
 hipError_t linear_mfma_strided(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                               const void* x, void* out, int64_t n, int64_t k, int64_t m,
-                              const void* bias, int64_t ldx, int64_t ldy, bool bf16t,
-                              hipStream_t stream) {
+                              const void* bias, int64_t ldx, int64_t ldy, void* workspace,
+                              size_t workspace_bytes, bool bf16t, hipStream_t stream) {
   if (ldx < k || ldy < n) return hipErrorInvalidValue;
   if (bf16t) {
     return linear_launch<WeightSource::kBf16t>(packed, nullptr, 0, x, out, n, k, m, bias, ldx, ldy,
-                                               stream);
+                                               workspace, workspace_bytes, stream);
   }
   return linear_launch<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m, bias, ldx,
-                                            ldy, stream);
+                                            ldy, workspace, workspace_bytes, stream);
+}
+
+// K splits the dense route will use for this shape. The workspace query and the
+// launcher both read it, so they cannot disagree about the partial plane.
+int mfma_dense_splits(int64_t m, int64_t n, int64_t k) {
+  if (m < 16 || n <= 0 || k <= 0 || n % kSuperAtomRows != 0) return 1;
+  return mfma_plan(m, n, k).kSplits;
 }
 
 hipError_t moe_linear_mfma(const uint8_t* packed, const uint4* escapes, const int64_t* escape_offsets,
