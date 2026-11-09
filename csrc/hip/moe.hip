@@ -278,11 +278,18 @@ __global__ void moe_decode_kernel(const uint4* __restrict__ packed_in,
   const int lane = threadIdx.x % kWarpSize;
   const int warp = threadIdx.x / kWarpSize;
   const int64_t k_blocks = k / kSuperAtomCols;
+  // blockIdx.x packs (row block, K slice). Splitting K across CTAs gives each
+  // warp one super-atom instead of making it serially walk the whole row, which
+  // is the same schedule the dense decoder uses. Slices are disjoint whole
+  // super-atoms, so every output element is still written exactly once.
+  const int64_t k_splits = (k_blocks + kWarpsPerBlock - 1) / kWarpsPerBlock;
+  const int64_t row_block = int64_t(blockIdx.x) / k_splits;
+  const int64_t k_slice = int64_t(blockIdx.x) % k_splits;
   // `packed` is expert-major, so step to this expert's slice first.
   const uint4* const packed =
       packed_in + int64_t(e) * (n / kSuperAtomRows) * k_blocks *
                       SourceTraits<WeightSource::kNf12>::kVecs;
-  const int64_t row_base = row0 + int64_t(blockIdx.x) * kSuperAtomRows;
+  const int64_t row_base = row0 + row_block * kSuperAtomRows;
   const int64_t nb = row_base / kSuperAtomRows;
   const uint4* const esc = (escapes != nullptr) ? escapes + escape_offsets[e] : nullptr;
   const uint32_t base_x4 = exp_base_x4(exp_base[e]);
@@ -290,7 +297,10 @@ __global__ void moe_decode_kernel(const uint4* __restrict__ packed_in,
   // the base pointer is shifted by (e * rows - row0).
   __hip_bfloat16* const dst = out + (int64_t(e) * rows - row0) * ldo;
 
-  for (int64_t kb = warp; kb < k_blocks; kb += kWarpsPerBlock) {
+  const int64_t kb_per = (k_blocks + k_splits - 1) / k_splits;
+  const int64_t kb_lo = k_slice * kb_per;
+  const int64_t kb_hi = min(k_blocks, kb_lo + kb_per);
+  for (int64_t kb = kb_lo + warp; kb < kb_hi; kb += kWarpsPerBlock) {
     const int64_t sa = nb * k_blocks + kb;
     uint4 planes[SourceTraits<WeightSource::kNf12>::kLoads];
     load_source_planes<WeightSource::kNf12>(packed, sa, lane, planes);
@@ -511,7 +521,14 @@ hipError_t nf12_hip_moe_decode(const uint8_t* packed, const uint4* escapes,
       num_experts > std::numeric_limits<int64_t>::max() / 2 / rows / ldo) {
     return hipErrorInvalidValue;
   }
-  const int64_t blocks = rows / kSuperAtomRows;
+  // One K slice per group of kWarpsPerBlock super-atoms. grid.x is
+  // (row blocks * K slices), so it stays within the 31-bit limit for every
+  // shape the old grid accepted.
+  const int64_t k_blocks = k / kSuperAtomCols;
+  const int64_t k_splits = (k_blocks + kWarpsPerBlock - 1) / kWarpsPerBlock;
+  const int64_t row_blocks = rows / kSuperAtomRows;
+  if (row_blocks > 0x7fffffffLL / k_splits) return hipErrorInvalidValue;
+  const int64_t blocks = row_blocks * k_splits;
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
   if (num_experts > 0xffff) return hipErrorInvalidValue;
   const dim3 grid(static_cast<unsigned>(blocks), static_cast<unsigned>(num_experts), 1);

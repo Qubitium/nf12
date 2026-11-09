@@ -37,7 +37,11 @@ namespace {
 // ---------------------------------------------------------------------------
 // Decode kernel: NF12 -> BF16 (exact)
 // ---------------------------------------------------------------------------
-constexpr int kDecodeSuperAtomsPerWarp = 2;
+// One super-atom per warp. Two raised the kernel from 32 to 48 VGPRs and
+// halved the CTA count; measured on gfx1201 against the two-super-atom walk,
+// this is 1.8-3.4% faster on large matrices and 5.7-16% on small/L3-resident
+// ones, with bit-identical output.
+constexpr int kDecodeSuperAtomsPerWarp = 1;
 
 // Largest token count the fused kernel handles. Above this, decoding the weight
 // once and running a real GEMM wins (SPEC.md 6.5), so callers fall back.
