@@ -80,4 +80,13 @@ inline int64_t waves_for(int64_t ctas, const DeviceTraits& t) {
   return (ctas + per - 1) / per;
 }
 
+// A part wide enough that the codec's original 8-wave CTA would leave most of
+// it idle for the duration of the one-CTA serial scan. The alternative shapes
+// are tuned for this case and are only selected here; a 32-CU wave32 RDNA4 part
+// keeps the shapes those kernels were originally measured with. This is a
+// device property, not an arch string.
+inline bool is_wide_part(const DeviceTraits& t) {
+  return t.wave_size == 64 && t.compute_units >= 128;
+}
+
 }  // namespace nf12_hip

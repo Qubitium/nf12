@@ -37,6 +37,13 @@ constexpr int kAnalyzeSuperAtomsPerWarp = 4;
 constexpr int kUnitSuperAtoms = 2;
 constexpr int kScanThreads = 256;
 constexpr int kScanItemsPerThread = 8;
+// Wide-part scan shape, selected only by `is_wide_part`. One CTA walks the whole
+// unit array, so a 256-thread CTA leaves a 304-CU part idle for the walk. 1024
+// threads (16 wave64s) with four items each cuts the tile count fourfold.
+constexpr int kScanWideThreads = 1024;
+constexpr int kScanWideItemsPerThread = 4;
+constexpr int64_t kScanWideMinUnits = 2048;
+static_assert(kScanWideThreads / 32 <= 32, "the wide scan's group totals fit one shuffle pass");
 constexpr int64_t kMaxGridX = 0x7fffffffLL;
 
 int64_t num_super_atoms(int64_t n, int64_t k) {
@@ -172,6 +179,74 @@ __global__ void __launch_bounds__(kScanThreads) scan_kernel(uint64_t* __restrict
     }
     carry += tile_total;
     offset += valid;
+    __syncthreads();
+  }
+  if (tid == 0) v[n] = carry;
+}
+
+// Wide-part scan: same prefix sum and the same exact `v[n]`, in a shape that
+// keeps a 304-CU part busy. Each 32-lane group scans its totals with an explicit
+// width so wave64 and wave32 behave identically, then every group redundantly
+// prefix-scans the group totals instead of serialising 31 shared reads.
+// Selection is by `is_wide_part` in the launcher; the narrow shape above stays
+// the default and is byte-for-byte the kernel RDNA4 was tuned against.
+__device__ __forceinline__ uint64_t scan_shfl_up32(uint64_t v, int delta) {
+  const uint64_t lo = __shfl_up(static_cast<uint32_t>(v), delta, 32);
+  const uint64_t hi = __shfl_up(static_cast<uint32_t>(v >> 32), delta, 32);
+  return lo | (hi << 32);
+}
+
+template <int kThreads, int kItems>
+__global__ void __launch_bounds__(kThreads) scan_kernel_wide(uint64_t* __restrict__ v, int64_t n) {
+  constexpr int kGroups = kThreads / 32;
+  __shared__ uint64_t group_sums[kGroups];
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int group = tid >> 5;
+  const int base = tid * kItems;
+  uint64_t carry = 0;
+  for (int64_t offset = 0; offset < n; offset += kThreads * kItems) {
+    const int valid = static_cast<int>(min(int64_t(kThreads * kItems), n - offset));
+    uint64_t items[kItems];
+#pragma unroll
+    for (int i = 0; i < kItems; ++i)
+      items[i] = (base + i < valid) ? v[offset + base + i] : uint64_t(0);
+
+    // Sequential scan within this thread's items.
+#pragma unroll
+    for (int i = 1; i < kItems; ++i) items[i] += items[i - 1];
+    const uint64_t thread_total = items[kItems - 1];
+
+    // 32-lane exclusive scan of the per-thread totals, width named explicitly.
+    uint64_t inclusive = thread_total;
+#pragma unroll
+    for (int d = 1; d < 32; d <<= 1) {
+      const uint64_t other = scan_shfl_up32(inclusive, d);
+      if (lane >= d) inclusive += other;
+    }
+    const uint64_t thread_prefix = inclusive - thread_total;
+    if (lane == 31) group_sums[group] = inclusive;
+    __syncthreads();
+
+    // Redundant prefix over the per-group totals: lane g holds their inclusive
+    // sum, and group `group` broadcasts its exclusive value.
+    const uint64_t own = (lane < kGroups) ? group_sums[lane] : uint64_t(0);
+    uint64_t win = own;
+#pragma unroll
+    for (int d = 1; d < 32; d <<= 1) {
+      const uint64_t other = scan_shfl_up32(win, d);
+      if (lane >= d) win += other;
+    }
+    const uint64_t group_prefix = __shfl(win - own, group, 32);
+    const uint64_t tile_total = __shfl(win, kGroups - 1, 32);
+    __syncthreads();
+
+    const uint64_t thread_prefix_total = carry + group_prefix + thread_prefix;
+#pragma unroll
+    for (int i = 0; i < kItems; ++i) {
+      if (base + i < valid) v[offset + base + i] = thread_prefix_total + (i ? items[i - 1] : uint64_t(0));
+    }
+    carry += tile_total;
     __syncthreads();
   }
   if (tid == 0) v[n] = carry;
@@ -315,7 +390,18 @@ hipError_t nf12_hip_encode(const void* w_in, int64_t n, int64_t k, int64_t ldw, 
                                                         n_units);
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) return err;
-  scan_kernel<<<1, kScanThreads, 0, stream>>>(units, n_units);
+  // A wide part can afford the 32-wave CTA; every other device keeps the shape
+  // this kernel was originally tuned with.
+  int scan_device = 0;
+  const bool wide = hipGetDevice(&scan_device) == hipSuccess &&
+                    nf12_hip::is_wide_part(nf12_hip::device_traits(scan_device)) &&
+                    n_units >= kScanWideMinUnits;
+  if (wide) {
+    scan_kernel_wide<kScanWideThreads, kScanWideItemsPerThread>
+        <<<1, kScanWideThreads, 0, stream>>>(units, n_units);
+  } else {
+    scan_kernel<<<1, kScanThreads, 0, stream>>>(units, n_units);
+  }
   if ((err = hipGetLastError()) != hipSuccess) return err;
   // Check capacity and 32-bit index bounds before writing packed/escape outputs.
   uint64_t total;
