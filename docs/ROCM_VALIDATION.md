@@ -9,13 +9,11 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 641 | 12 | 1 |
+| HIP + shared API | R9700 | 644 | 12 | 1 |
 | Shared API | RTX 4090 | 553 | 16 | 1 |
 
-The 641-case full HIP run was on `8e1835a`; head `40761fe` adds three
-out-of-range workspace-query cases, all covered by the latest-head focused
-run (10 native align tests and 19 shared align tests passed). CUDA runtime code
-is unchanged since its full run; the CUDA-only build still configures.
+Both full suites ran on `5250c61`, including the native MoE align buffer
+validation, out-of-range workspace-query cases, and BF16t MoE metadata guards.
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
 with two visible GPUs to exercise concurrent device/stream propagation. The
@@ -40,6 +38,11 @@ and now spans larger routed workloads across Y/Z (see the contract follow-up bel
 `tests/api/test_jit.py` verifies that changing `HIPFLAGS` invalidates the HIP
 build cache without affecting CUDA identity. The MoE twin test requires exact
 BF16 bit equality and finite outputs.
+
+BF16t MoE paths skip NF12 exponent metadata at compile time. Unoptimized IR
+confirms the null metadata reads are absent; optimized NF12 gate/down assembly
+and WMMA IR match the prior code after source-path/unit-ID normalization.
+
 `tests/hip/test_hip.py` checks matched BF16t kernels bitwise and uses dense
 BF16 only for the separate accumulation-order comparison. The C99 consumer runs against the active CUDA/HIP runtime and checks the
 shared exported API. Status strings come from one shared `csrc/status.cpp`;
@@ -91,9 +94,9 @@ context. All three confirmed findings are fixed:
   All 1581056 output elements match the NF12 C-API twin bitwise; all outputs
   are finite and guards are unchanged.
 
-The latest full HIP run took 469.64 s while this host ran other work; the
-earlier full CUDA run took 22.07 s. Both used GIL-disabled Python and two
-visible devices. These are test wall times, not kernel benchmarks.
+The full HIP run took 41.58 s and the full CUDA run took 75.81 s. Both used
+GIL-disabled Python, two visible devices, and one OMP/MKL thread. These are
+test wall times, not kernel benchmarks.
 
 A separate integration checkout at `8f31489` applied PR #7's test-only correction
 while loading the same native sources (before the additional graph tests). With GIL=0
