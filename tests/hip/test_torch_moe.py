@@ -265,6 +265,37 @@ def test_moe_linear_dropped_ids_zero_fill():
     assert int(got[int(offsets[-1]) :].abs().sum()) == 0
 
 
+def test_moe_linear_routed_tail_is_never_read():
+    """A tail tile clamps into the expert's assignments, not the gather capacity.
+
+    SPEC.md 9.2 leaves the gather tail unspecified. The tail tile has fewer
+    than 16 valid assignments, and clamping to `max_assignments` instead of
+    `row_base + m` dereferences those unspecified entries, so a poisoned value
+    names an activation row outside ``x``. The dropped rows are never written,
+    so this is a memory-safety guard rather than a numerical one: a large
+    enough poisoned index faults the kernel instead of changing the output.
+    """
+    torch.manual_seed(21)
+    e, n, k = 1, 256, 256
+    w = _moe_weights(e, n, k, 77)
+    nw = nf12.encode_moe(w)
+    x = _bf16((4, k), 0.05, 78)
+    # Three valid assignments: one 16-row tile with thirteen dropped rows.
+    offsets = torch.tensor([0, 3], device="cuda", dtype=torch.int64)
+    # Entries 3..7 are the unspecified tail; each is far outside x's 4 rows.
+    gather = torch.tensor(
+        [0, 1, 2, 1 << 28, -(1 << 28), 1 << 30, -1, 1 << 27],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    got = nf12.moe_linear(x, nw, offsets, gather=gather, gather_div=1, zero_fill=True)
+    ref = reference.moe_linear(x, w, offsets, gather=gather, gather_div=1)
+    assert _violations(got, ref) == 0
+    assert bool(torch.isfinite(got.float()).all())
+    # Rows no valid assignment writes stay zero.
+    assert int(got[3:].abs().sum()) == 0
+
+
 @pytest.mark.parametrize("twin", [False, True])
 def test_fused_moe_expert_map_drops_remote_experts(twin):
     """An expert_map of -1 means "another rank"; the result is this rank's partial sum."""
