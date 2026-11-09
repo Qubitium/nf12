@@ -101,9 +101,16 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   const int lane = threadIdx.x & 31;
   const int64_t unit = int64_t(blockIdx.x) * kWarpsPerBlock + (threadIdx.x >> 5);
   if (unit >= n_units) return;
+  // Walk units back to front so this pass starts where the analyze read
+  // ended: the tail of the weight is still resident in the 64 MiB Infinity
+  // Cache. The write pass then reads forward and starts on the head this
+  // pass leaves behind, giving both later passes an L3 hit. Unit indices (and
+  // therefore the escape order) are unchanged because counts are stored by
+  // flat unit id.
+  const int64_t work = n_units - 1 - unit;
   uint32_t count = 0;
   for (int i = 0; i < kUnitSuperAtoms; ++i) {
-    const int64_t sa = unit * kUnitSuperAtoms + i;
+    const int64_t sa = work * kUnitSuperAtoms + i;
     if (sa >= num_sa) break;
     AtomRegs r;
     load_atoms(w, ldw, super_atom(sa, k_blocks), lane, r);
@@ -113,7 +120,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       count += __popc(__builtin_amdgcn_ballot_w32(!encode_group_fast(r[j], base_x4, g)));
     }
   }
-  if (lane == 0) unit_counts[unit] = count;
+  if (lane == 0) unit_counts[work] = count;
 }
 
 // ---------------------------------------------------------------------------
