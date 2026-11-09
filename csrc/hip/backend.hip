@@ -52,7 +52,7 @@ cudaError_t pack_bf16t(const void* w, int64_t n, int64_t k, int64_t ldw,
 
 // M band the fused CDNA3 GEMM covers. Above it the M blocks re-read the packed
 // weight, and decode-once + rocBLAS is faster again.
-constexpr int64_t kMfmaFusedM = 64;
+constexpr int64_t kMfmaFusedM = 128;
 
 size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int device) {
   // A tail can require a larger split plane than the full M chunk.

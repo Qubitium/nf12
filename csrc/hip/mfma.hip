@@ -82,11 +82,9 @@ __device__ __forceinline__ MfmaD mfma(MfmaA a, MfmaA b, MfmaD c) {
 // Called with the low 32 lanes of a wave; the same codec helpers the RDNA4
 // decode kernel uses, so the decoded BF16 matches nf12_hip_decode bit for bit.
 template <WeightSource S>
-__device__ __forceinline__ void decode_tile(const uint4* __restrict__ packed,
-                                            const uint4* __restrict__ escapes, uint32_t base_x4,
-                                            int64_t sa, int dlane, __hip_bfloat16* __restrict__ dst) {
-  uint4 planes[SourceTraits<S>::kLoads];
-  load_source_planes<S>(packed, sa, dlane, planes);
+__device__ __forceinline__ void decode_tile_from(const uint4 (&planes)[SourceTraits<S>::kLoads],
+                                                 const uint4* __restrict__ escapes, uint32_t base_x4,
+                                                 int dlane, __hip_bfloat16* __restrict__ dst) {
   AtomRegs r;
   source_planes_to_atoms<S>(planes, base_x4, escapes, r);
   RowTile x;
@@ -100,6 +98,17 @@ __device__ __forceinline__ void decode_tile(const uint4* __restrict__ packed,
   // adds (lane>>2)*ld + 8*(lane&3), which is exactly a 16x64 row-major tile.
   store_row_tile(dst, int64_t(dlane >> 2) * kTileRowStride + 8 * (dlane & 3),
                  kTileRowStride, x);
+}
+
+// Load + decode in one call. The dense tile kernel instead prefetches the planes
+// a step ahead so the packed-weight latency overlaps the matrix-core work.
+template <WeightSource S>
+__device__ __forceinline__ void decode_tile(const uint4* __restrict__ packed,
+                                            const uint4* __restrict__ escapes, uint32_t base_x4,
+                                            int64_t sa, int dlane, __hip_bfloat16* __restrict__ dst) {
+  uint4 planes[SourceTraits<S>::kLoads];
+  load_source_planes<S>(packed, sa, dlane, planes);
+  decode_tile_from<S>(planes, escapes, base_x4, dlane, dst);
 }
 
 // One lane's 4-BF16 window of an activation row. row = lane%16 (the M index),
@@ -346,6 +355,13 @@ __global__ void __launch_bounds__(kWave * kCols)
   const int b_row = (lane % 16) * kTileRowStride + 4 * quad;
   const int a_col = (lane % 16) * kXStride + 4 * quad;
   __hip_bfloat16* const sh = &tile[wave][0];
+  const int64_t sa0 = (n0 / kSuperAtomRows) * k_blocks;
+
+  // Prefetch one super-atom's packed planes. The decode is a small amount of
+  // arithmetic behind a 1.5 KiB load, so issuing that load a step early keeps
+  // the packed-weight latency off the critical path.
+  uint4 planes[SourceTraits<S>::kLoads];
+  if (decode_pass && kb_begin < kb_end) load_source_planes<S>(packed, sa0 + kb_begin, dlane, planes);
 
   for (int64_t kb = kb_begin; kb < kb_end; ++kb) {
     // Stage this K block of every token tile once, 16 B per thread and fully
@@ -366,8 +382,8 @@ __global__ void __launch_bounds__(kWave * kCols)
       }
     }
     if (decode_pass) {
-      const int64_t sa = (n0 / kSuperAtomRows) * k_blocks + kb;
-      decode_tile<S>(packed, escapes, base_x4, sa, dlane, sh);
+      decode_tile_from<S>(planes, escapes, base_x4, dlane, sh);
+      if (kb + 1 < kb_end) load_source_planes<S>(packed, sa0 + kb + 1, dlane, planes);
     }
     __syncthreads();
 
@@ -453,9 +469,10 @@ inline MfmaPlan mfma_plan(int64_t m, int64_t n, int64_t k) {
   // Two CTAs per CU is enough to keep the memory pipe busy; stop there rather
   // than paying for more partial planes than the machine can use.
   constexpr int64_t kTargetCtas = 2 * 304;
-  // Two CTAs per CU is enough to keep the memory pipe busy. A wide N already
-  // supplies the CTAs, so it takes fewer K splits and a smaller partial plane.
-  p.kSplits = (p.nGroups >= 128) ? 4 : 8;
+  // Enough CTAs per CU to keep the memory pipe busy, without paying for a
+  // partial plane bigger than the work it splits. A wide N already supplies
+  // the CTAs; a tall tile (kMt > 2) has more MFMA per barrier and needs fewer.
+  p.kSplits = (p.nGroups >= 128) ? 4 : (p.kMt <= 2 ? 16 : 8);
   while (p.kSplits > 1 && p.nGroups * p.mBlocks * p.kSplits > 2 * kTargetCtas) p.kSplits /= 2;
   return p;
 }
