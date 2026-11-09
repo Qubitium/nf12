@@ -310,7 +310,7 @@ constexpr int kXStride = kSuperAtomCols + 8;
 // Token tiles per CTA. Above four the activation staging and the accumulator
 // array stop fitting in a CTA that keeps a second resident slot, and the extra
 // packed-weight re-read that grid.y splitting costs is smaller than the loss.
-constexpr int kFusedTiles = 4;
+constexpr int kFusedTiles = 8;
 
 template <WeightSource S, int kMt, int kCols>
 __global__ void __launch_bounds__(kWave * kCols)
@@ -462,7 +462,10 @@ inline MfmaPlan mfma_plan(int64_t m, int64_t n, int64_t k) {
   MfmaPlan p{};
   const int64_t n_tiles = n / kSuperAtomRows;
   const int tiles = static_cast<int>((m + 15) / 16);
-  p.kCols = (n_tiles % 4 == 0) ? 4 : 1;
+  // A wide N can afford eight column tiles per CTA, which halves the
+  // activation re-read again; a narrow N needs the CTA count more than the
+  // reuse.
+  p.kCols = (n_tiles >= 512 && n_tiles % 8 == 0) ? 8 : ((n_tiles % 4 == 0) ? 4 : 1);
   p.kMt = tiles < kFusedTiles ? tiles : kFusedTiles;
   p.mBlocks = (m + p.kMt * 16 - 1) / (p.kMt * 16);
   p.nGroups = n_tiles / p.kCols;
@@ -523,7 +526,9 @@ hipError_t linear_launch(const uint8_t* packed, const uint4* escapes, uint32_t e
                                                                m, yb, bb, ldx, ldy, partial)
 #define NF12_MFMA_COLS(MT)          \
   do {                              \
-    if (plan.kCols == 4)            \
+    if (plan.kCols == 8)            \
+      NF12_MFMA_TILE(MT, 8);        \
+    else if (plan.kCols == 4)       \
       NF12_MFMA_TILE(MT, 4);        \
     else                            \
       NF12_MFMA_TILE(MT, 1);        \
@@ -532,6 +537,10 @@ hipError_t linear_launch(const uint8_t* packed, const uint4* escapes, uint32_t e
     case 1: NF12_MFMA_COLS(1); break;
     case 2: NF12_MFMA_COLS(2); break;
     case 3: NF12_MFMA_COLS(3); break;
+    case 4: NF12_MFMA_COLS(4); break;
+    case 5: NF12_MFMA_COLS(5); break;
+    case 6: NF12_MFMA_COLS(6); break;
+    case 7: NF12_MFMA_COLS(7); break;
     default: NF12_MFMA_COLS(kFusedTiles); break;
   }
 #undef NF12_MFMA_COLS
