@@ -116,6 +116,8 @@ def _cache_key(source: Path, archs: list[int]) -> str:
         # (CMAKE_HIP_COMPILER, then PATH, then ROCM_PATH/HIP_PATH).
         identity["hip_compiler"] = _hip_compiler()
         identity["hip_toolkit"] = torch.version.hip
+        # CMake initializes HIP compiler flags from this environment variable.
+        identity["hip_flags"] = os.environ.get("HIPFLAGS")
     digest.update(json.dumps(identity, sort_keys=True).encode())
     digest.update(Path(__file__).read_bytes())
     files = [source / "CMakeLists.txt"]
