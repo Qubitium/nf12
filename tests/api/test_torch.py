@@ -9,6 +9,7 @@ import functools
 import nf12
 import pytest
 import torch
+from _helpers import assert_bitwise
 from nf12 import reference
 from torch import nn
 
@@ -17,13 +18,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or R
 DEV = "cuda"
 
 
-def bits(t: torch.Tensor) -> torch.Tensor:
-    return t.contiguous().view(torch.int16)
 
 
-def assert_bitwise(a: torch.Tensor, b: torch.Tensor) -> None:
-    assert a.shape == b.shape and a.dtype == b.dtype
-    assert torch.equal(bits(a), bits(b))
 
 
 def weight(n: int, k: int, seed: int = 0, scale: float = 0.02) -> torch.Tensor:

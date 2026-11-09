@@ -166,6 +166,19 @@ def test_padded_linear_strides_preserve_guard_columns(abi, m):
         assert bool((guarded[[0, -1]] == -7).all())
         assert bool((guarded[:, n:] == -7).all())
         assert torch.equal(out.contiguous().view(torch.int16), expected.view(torch.int16))
+        if need:
+            # The scratch is caller-owned and may arrive with any prior contents.
+            dirty = torch.full((need,), 0x7F, device="cuda", dtype=torch.uint8)
+            again = torch.empty_like(out)
+            if bf16t:
+                rc = abi.nf12_linear_bf16t(x.data_ptr(), m, x.stride(0), twin.data_ptr(), n, k,
+                                           bias.data_ptr(), again.data_ptr(), again.stride(0),
+                                           dirty.data_ptr(), need, _stream())
+            else:
+                rc = abi.nf12_linear(x.data_ptr(), m, x.stride(0), C.byref(cw), bias.data_ptr(),
+                                     again.data_ptr(), again.stride(0), dirty.data_ptr(), need, _stream())
+            assert rc == 0
+            assert torch.equal(again.view(torch.int16), expected.view(torch.int16))
 
 
 @pytest.mark.parametrize("n,k", [(4096, 4096), (14336, 4096), (65536, 4096), (65552, 4096)])

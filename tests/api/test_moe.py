@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import nf12
 import pytest
 import torch
+from _helpers import assert_bitwise, bits
 from nf12 import reference
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm GPU required")
@@ -20,13 +21,8 @@ DEV = "cuda"
 OK, INVALID, UNSUPPORTED, INSUFFICIENT, CUDA_ERROR = range(5)
 
 
-def bits(t: torch.Tensor) -> torch.Tensor:
-    return t.contiguous().view(torch.int16)
 
 
-def assert_bitwise(a: torch.Tensor, b: torch.Tensor) -> None:
-    assert a.shape == b.shape and a.dtype == b.dtype
-    assert torch.equal(bits(a), bits(b))
 
 
 def gen(seed: int) -> torch.Generator:

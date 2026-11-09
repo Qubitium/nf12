@@ -9,8 +9,8 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 627 | 12 | 1 |
-| Shared API | RTX 4090 | 551 | 20 | 1 |
+| HIP + shared API | R9700 | 617 | 12 | 1 |
+| Shared API | RTX 4090 | 541 | 20 | 1 |
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
 with two visible GPUs to exercise concurrent device/stream propagation. The
@@ -79,7 +79,7 @@ context. All three confirmed findings are fixed:
   All 1581056 output elements match the NF12 C-API twin bitwise; all outputs
   are finite and guards are unchanged.
 
-The current PR suites above passed in 25.54 s (HIP) and 24.64 s (CUDA), with
+The current PR suites above passed in 29.37 s (HIP) and 21.75 s (CUDA), with
 GIL disabled and two visible devices. The benchmark/device selection fix does
 not establish new performance numbers for the canonical shape grid.
 

@@ -8,13 +8,13 @@ from __future__ import annotations
 import ctypes
 import os
 
+import nf12
 import pytest
 import torch
 import torch.nn.functional as F
-from torch import nn
-
-import nf12
+from _helpers import assert_bitwise, bits
 from nf12 import reference
+from torch import nn
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -23,13 +23,8 @@ INT32_MIN, INT32_MAX = -(2**31), 2**31 - 1
 INT64_MIN, INT64_MAX = -(2**63), 2**63 - 1
 
 
-def bits(t: torch.Tensor) -> torch.Tensor:
-    return t.contiguous().view(torch.int16)
 
 
-def assert_bitwise(a: torch.Tensor, b: torch.Tensor) -> None:
-    assert a.shape == b.shape and a.dtype == b.dtype
-    assert torch.equal(bits(a), bits(b))
 
 
 def table(v: int, h: int, seed: int = 0, scale: float = 0.02) -> torch.Tensor:
