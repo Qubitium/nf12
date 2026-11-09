@@ -180,3 +180,63 @@ def test_decode_slices_match_bf16_gemm(abi, m, n, k):
         torch.addmm(bias[start:end], x, w[start:end].t(), out=expected[:, start:end])
     out = nf12.linear(x, nw, bias)
     assert torch.equal(out.view(torch.int16), expected.view(torch.int16))
+
+
+def test_moe_decode_accepts_large_grid_x(abi):
+    n, k = 524288, 64  # 32768 blocks exceeds the old mistaken 15-bit cap.
+    w = torch.ones((1, n, k), dtype=torch.bfloat16, device="cuda")
+    nw = nf12.encode_moe(w)
+    cw = MoeWeight(nw.packed.data_ptr(), nw.escapes.data_ptr(), nw.escape_offsets.data_ptr(),
+                   nw.exp_base.data_ptr(), 1, n, k)
+    offsets = torch.tensor([0, 1], dtype=torch.int64, device="cuda")
+    out = torch.empty_like(w)
+    assert abi.nf12_moe_decode(C.byref(cw), offsets.data_ptr(), 1, 0, n,
+                              out.data_ptr(), k, _stream()) == 0
+    assert torch.equal(w.view(torch.int16), out.view(torch.int16))
+
+
+def test_moe_invalid_expert_count_and_empty_topk(abi):
+    abi.nf12_moe_align_workspace_bytes.argtypes = [C.c_int64] * 3
+    abi.nf12_moe_align_workspace_bytes.restype = C.c_size_t
+    assert abi.nf12_moe_align_workspace_bytes(1, 1, 2**31) == 0
+    abi.nf12_moe_combine.argtypes = [C.c_void_p] + [C.c_int64] * 4 + [C.c_void_p, C.c_int64, C.c_void_p]
+    abi.nf12_moe_combine.restype = C.c_int
+    assert abi.nf12_moe_combine(None, 8, 0, 2**31, 8, None, 8, _stream()) == 1
+
+
+def test_runtime_status_preserves_thread_local_errors(tmp_path):
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from torch.utils.cpp_extension import ROCM_HOME
+
+    compiler = shutil.which("c++")
+    assert compiler and ROCM_HOME, "C++ compiler and ROCm headers required for ABI helper check"
+    root = Path(__file__).resolve().parents[2]
+    source = tmp_path / "status.cpp"
+    source.write_text('''
+#include "c_api_common.cuh"
+#include <cassert>
+#include <thread>
+int main() {
+  using namespace nf12_hip_capi;
+  assert(status(hipErrorNoBinaryForGpu) == NF12_ERROR_UNSUPPORTED);
+  assert(status(hipErrorOutOfMemory) == NF12_ERROR_CUDA);
+  assert(status(hipSuccess) == NF12_OK);
+  assert(t_last_error == hipErrorOutOfMemory);
+  std::thread other([] {
+    assert(t_last_error == hipSuccess);
+    assert(status(hipErrorNotSupported) == NF12_ERROR_UNSUPPORTED);
+    assert(status(hipSuccess) == NF12_OK);
+    assert(t_last_error == hipErrorNotSupported);
+  });
+  other.join();
+  assert(t_last_error == hipErrorOutOfMemory);
+}
+''')
+    executable = tmp_path / "status"
+    subprocess.run([compiler, "-std=c++17", "-pthread", "-DNF12_HIP", "-D__HIP_PLATFORM_AMD__",
+                    f"-I{root / 'include'}", f"-I{root / 'csrc/hip'}", f"-I{ROCM_HOME}/include",
+                    str(source), "-o", str(executable)], check=True, capture_output=True, text=True)
+    subprocess.run([str(executable)], check=True, capture_output=True, text=True)

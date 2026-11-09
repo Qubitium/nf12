@@ -24,7 +24,8 @@ using nf12_hip_capi::valid_workspace;
 extern "C" {
 
 size_t nf12_moe_align_workspace_bytes(int64_t num_tokens, int64_t topk, int64_t num_experts) {
-  if (num_tokens < 0 || topk < 1 || num_experts < 1) return 0;
+  if (num_tokens < 0 || topk < 1 || num_experts < 1 ||
+      num_experts > std::numeric_limits<int32_t>::max()) return 0;
   if (num_tokens > 0x7fffffffLL / topk) return 0;
   return nf12_hip_moe_align_workspace_bytes(num_tokens * topk, num_experts);
 }
@@ -115,7 +116,7 @@ nf12_status_t nf12_moe_linear_bf16t(const void* x_bf16, int64_t ldx, const int32
 nf12_status_t nf12_moe_combine(const void* y_bf16, int64_t ldy, int64_t num_tokens, int64_t topk,
                                int64_t n, void* out_bf16, int64_t ldo, cudaStream_t stream) {
   constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
-  if (num_tokens < 0 || topk < 1 || topk > std::numeric_limits<int64_t>::max() / 2 || n <= 0 ||
+  if (num_tokens < 0 || topk < 1 || topk > std::numeric_limits<int32_t>::max() || n <= 0 ||
       n % 8 != 0) {
     return NF12_ERROR_INVALID_ARGUMENT;
   }

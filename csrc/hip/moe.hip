@@ -491,7 +491,7 @@ hipError_t nf12_hip_moe_decode(const uint8_t* packed, const uint4* escapes,
   }
   if (rows == 0) return hipSuccess;
   const int64_t blocks = rows / kSuperAtomRows;
-  if (blocks > 0x7fffLL) return hipErrorInvalidValue;
+  if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
   if (num_experts > 0xffff) return hipErrorNotSupported;
   const dim3 grid(static_cast<unsigned>(blocks), static_cast<unsigned>(num_experts), 1);
   moe_decode_kernel<<<grid, kThreadsPerBlock, 0, stream>>>(
