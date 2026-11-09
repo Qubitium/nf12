@@ -54,7 +54,7 @@ The bridge shrinks from 975 to 841 lines across its implementation and private
 headers. The backend-specific copies of public validation and entry points are
 removed rather than wrapped in another forwarding layer.
 
-Validation on the final shared frontend: **611 passed** on R9700 and **445
+Validation on the final shared frontend: **617 passed** on R9700 and **447
 passed** on RTX 4090, using GIL=0 and two visible devices. There were 12/13
 backend-dependent skips respectively, plus the known PR #7 case deselected
 in both runs. All four new ABI contract tests ran on both backends.

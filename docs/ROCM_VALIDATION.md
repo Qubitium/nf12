@@ -9,8 +9,8 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 611 | 12 | 1 |
-| Shared API | RTX 4090 | 445 | 13 | 1 |
+| HIP + shared API | R9700 | 617 | 12 | 1 |
+| Shared API | RTX 4090 | 447 | 13 | 1 |
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
 with two visible GPUs to exercise concurrent device/stream propagation. The known CUDA MoE
@@ -25,12 +25,38 @@ RTX 5090 is not claimed validated by these runs.
 offsets with output guards; tail-dependent workspace sizing and rejection
 before output writes; zero-token routing on a non-default stream; padded
 strides for both packed and BF16t inputs; bias alignment; slice byte budgets;
-and exact BF16 GEMM results for single- and multi-slice fallbacks.
+exact BF16 GEMM results for single- and multi-slice fallbacks; and WMMA launch
+grids above the old 32767-block ceiling. The latter admits Y up to 65535
+and rejects larger grids as unsupported before output writes.
+`tests/api/test_jit.py` verifies that changing `HIPFLAGS` invalidates the HIP
+build cache without affecting CUDA identity. The MoE twin test requires exact
+BF16 bit equality and finite outputs.
 `tests/hip/test_hip.py` checks matched BF16t kernels bitwise and uses dense
 BF16 only for the separate accumulation-order comparison. The C99 consumer runs against the active CUDA/HIP runtime and checks the
 shared exported API. Status strings come from one shared `csrc/status.cpp`;
 runtime error state is thread-local and survives successful/validation calls.
 CMake uses `hip::host` for runtime headers, including LLVM-subdirectory compiler paths.
+
+### Independent review follow-up
+
+Two independent reviews examined head `9a5074e`. Concurrency probes passed
+776 tensor comparisons across CUDA/HIP, including GIL=0, multiple streams and
+devices, graph replay, failed-build retries, and thread-local error isolation.
+The separate correctness review passed 171 exact NF12/BF16t comparisons and
+an all-65536-BF16-pattern codec check. These probes did not use a sanitizer
+or test hardware faults; they are evidence for the exercised paths.
+
+The review found the WMMA grid limit and missing `HIPFLAGS` cache identity.
+Both are corrected. The post-fix suites above include the new regression
+tests, using two visible GPUs per backend. On R9700, one 16-by-64 all-one
+expert produces exactly 64 per element and matches its BF16t twin:
+
+| Assignments | Reserved Y blocks | Result | Mismatches / changed guards |
+| ---: | ---: | --- | --- |
+| 524256 | 32767 | Success | 0 / 0 |
+| 524272 | 32768 | Success | 0 / 0 |
+| 1048544 | 65535 | Success | 0 / 0 |
+| 1048560 | 65536 | Unsupported | No output writes |
 
 ## Large-batch fallback
 
