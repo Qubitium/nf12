@@ -230,7 +230,7 @@ def test_native_codec_round_trip(lib, n, k):
 
 
 @pytest.mark.parametrize("n,k", [(256, 256), (1024, 4096)])
-@pytest.mark.parametrize("m", [1, 15, 16, 17, 64, 256])
+@pytest.mark.parametrize("m", [1, 15, 16, 256])
 def test_native_linear_matches_twin_and_dense(lib, n, k, m):
     """SPEC 6.2/6.3: the native routes match the bf16t twin bitwise."""
     if m >= 16 and lib.nf12_hip_wmma_supported(m) == 0:

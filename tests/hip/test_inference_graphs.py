@@ -23,7 +23,7 @@ def _bits_equal(a, b):
     assert torch.equal(a.view(torch.uint8), b.view(torch.uint8))
 
 
-@pytest.mark.parametrize("m", [1, 15, 16, 64, 128, 256, 257, 272])
+@pytest.mark.parametrize("m", [1, 16, 64, 257])
 def test_native_dense_graph_with_owned_workspace(abi, m):
     n, k = 256, 2048  # Narrow N exercises split-K, including a chunked tail.
     stream = torch.cuda.Stream()

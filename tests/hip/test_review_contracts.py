@@ -46,9 +46,9 @@ def abi(lib):
 
 
 @pytest.mark.parametrize("twin", [False, True])
-@pytest.mark.parametrize("bad", ["k_zero", "k_tail", "n_zero", "ldx", "ldy", "gather_div",
-                                "negative_count", "large_count", "packed", "x", "out", "offsets",
-                                "alignment", "empty"])
+# The rest of the invalid-argument matrix runs against the shared ABI in
+# tests/api/test_moe.py::test_c_linear_validation; these are the native-only gaps.
+@pytest.mark.parametrize("bad", ["k_zero", "k_tail", "n_zero", "large_count", "out", "empty"])
 def test_native_moe_linear_matches_shared_validation(abi, twin, bad):
     p, i = C.c_void_p, C.c_int64
     fn = abi.nf12_hip_moe_linear_bf16t if twin else abi.nf12_hip_moe_linear
