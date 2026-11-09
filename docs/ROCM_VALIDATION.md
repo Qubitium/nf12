@@ -9,7 +9,7 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 617 | 12 | 1 |
+| HIP + shared API | R9700 | 623 | 12 | 1 |
 | Shared API | RTX 4090 | 447 | 13 | 1 |
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
@@ -57,6 +57,39 @@ expert produces exactly 64 per element and matches its BF16t twin:
 | 524272 | 32768 | Success | 0 / 0 |
 | 1048544 | 65535 | Success | 0 / 0 |
 | 1048560 | 65536 | Unsupported | No output writes |
+
+### Fresh-context review
+
+Two new agents independently reviewed `526b89d` without inherited review
+context. All three confirmed findings are fixed:
+
+- `bench/hip_linear.py --device cuda:1` now selects that device before native
+  launches, stream acquisition, and timing. The regression test failed before
+  the fix and passes on two R9700s, with zero incorrect outputs at M=1 and 16.
+- Mixed CUDA+HIP C-library builds now pass `-Wall -Wextra -Werror`; both
+  `nf12` (SM89) and `nf12_hip` (gfx1201) build in the same CMake tree.
+- `nf12_hip_linear_wmma_bf16t` now uses the existing shared validation and
+  chunk dispatcher. Native-symbol tests cover M=256, 257, 271, 272, 288 and
+  512, including non-default streams, small tails, tail-dependent scratch,
+  undersized workspace rejection before writes, and guarded allocations.
+  All 1581056 output elements match the NF12 C-API twin bitwise; all outputs
+  are finite and guards are unchanged.
+
+The current PR suites above passed in 27.45 s (HIP) and 68.27 s (CUDA), with
+GIL disabled and two visible devices. The benchmark/device selection fix does
+not establish new performance numbers for the canonical shape grid.
+
+A separate integration checkout applied PR #7's test-only correction to the
+current tests while loading these same source-built libraries. With GIL=0
+and two GPUs, the full suites passed with **zero deselections**:
+
+| Suite with PR #7 test correction | Device | Passed | Skipped | Seconds |
+| --- | --- | ---: | ---: | ---: |
+| HIP + shared API | R9700 | 635 | 12 | 25.98 |
+| Shared API | RTX 4090 | 459 | 13 | 20.04 |
+
+PR #7 remains separate; these integration results do not claim the unchanged
+reference-tolerance test passes in PR #3 alone.
 
 ## Large-batch fallback
 
