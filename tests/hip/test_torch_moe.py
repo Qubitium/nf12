@@ -225,7 +225,8 @@ def test_moe_linear_bf16t_matches_nf12():
         row_scale=scale,
         zero_fill=True,
     )
-    assert _violations(b, a.double()) == 0
+    assert torch.isfinite(a).all() and torch.isfinite(b).all()
+    assert torch.equal(b.view(torch.int16), a.view(torch.int16))
 
 
 @pytest.mark.parametrize("twin", [False, True])
