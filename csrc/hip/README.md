@@ -333,6 +333,14 @@ RDNA4 path**. What is shared is the codec (bit-exact on both), the 32-lane atom
 group (`kAtomLanes`, two groups per CDNA wave), and the tile geometry. What is
 device-specific is behind the trait record.
 
+**That RDNA4 claim is checked, not asserted.** Extracting the offload bundles
+from a `gfx1200;gfx1201` build of this branch and of PR #3 (`24ee25d`), then
+comparing every device function by its encoded instruction words, gives 218
+PR #3 functions with **0 changed and 0 removed** on both architectures, plus
+88 added. Every added symbol is a CDNA3 kernel (`mfma_tile_kernel`,
+`mfma_reduce_kernel`, `linear_small_kernel`, `mfma_kernel`,
+`scan_kernel_wide`); nothing on the RDNA4 path moves.
+
 Hardware-derived facts recorded here so they are not re-litigated:
 
 * `v_dot2_f32_bf16` is `dot12`/`dot13-insts`, i.e. **not** on `gfx942` (only
@@ -440,7 +448,7 @@ does not pay for a partial plane it cannot use.
 That is 8.8× faster than the first CDNA3 cut at `m = 64` (215.5 µs) and 5.1× at
 `m = 128` (178.1 µs). The nf12/bf16t column is the honest measure of what the
 format buys, because both run the same kernel: nf12 wins every shape in the
-fused band of the PR #3 grid, **1.05–1.11×**, because it reads a quarter fewer
+fused band of the PR #3 grid, **1.05–1.17×**, because it reads a quarter fewer
 weight bytes and the decode is amortised over the whole CTA. The last two wins
 there came from the shared-memory layout: aligning the decoded tile's row
 stride to 16 bytes (4–9%) and issuing every split-K partial load before the
