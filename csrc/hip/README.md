@@ -462,8 +462,8 @@ bounds the partial plane by the CTA count instead of by `m*n*kSplits`.
 
 The CDNA3 tiling was compared item by item against the gfx942 kernels in
 `ROCm/aiter` (`a0bae86`, `csrc/opus_gemm/`) and `ROCm/FlyDSL` (`affc0d4`). Six
-candidate ideas were examined; all six are rejected for this kernel, and the
-reasons are recorded here so the comparison is not repeated.
+candidate ideas were examined; five are rejected for this kernel and one is
+adopted, and the reasons are recorded here so the comparison is not repeated.
 
 1. **OPUS 4-phase / PGR2 scheduling** (hand-counted `s_waitcnt_vmcnt(N)` and
    `s_waitcnt_lgkmcnt(N)`, 4–14 loads in flight, `ds_read_b128` interleaved with
@@ -494,10 +494,14 @@ reasons are recorded here so the comparison is not repeated.
    which exceeds the 160 KB opt-in limit once the decoded tiles are added. At
    `kMt = 4` it fits but only removes the partial plane at `m <= 64`, the band
    that is already at 1.15×.
-6. **OPUS auto split-K `min_iters` guard.** A no-op for this grid. `kSplits` is
-   already capped at `k_blocks`, and every cell of the PR #3 grid has
-   `k_blocks / kSplits >= 4` (64/16 at `m = 1`, 64/8 at `m = 128`, 224/2 at
-   `n = 14336`), so a "at least two K iterations per split" guard never binds.
+6. **OPUS auto split-K `min_iters` guard.** **Adopted.** A split that covers
+   fewer than two K blocks spends more on its FP32 partial plane than the extra
+   CTAs buy. It is a no-op on the 4096/14336 shapes (`k_blocks / kSplits` is 4
+   to 112 there), but `k = 896` is only 14 K blocks, so the eight splits the
+   CTA-count rule asks for are 1.75 iterations each. Capping it is worth
+   1.064 → 1.094 at `m = 32` on `896×4864`. Restricted to a CTA that batches
+   token tiles: a one-tile CTA has so little work per split that the extra CTAs
+   are what fill the machine, and halving them measured 12% slower at `m = 8`.
 
 Three reorderings of the K loop were built and measured against the committed
 kernel (`n = k = 4096`, cold L2, graph timing, nf12 µs at `m = 16 / 64 / 128`):
@@ -515,6 +519,51 @@ the barrier and the shared traffic, but each fragment load then becomes sixteen
 falls to a third of its throughput. The staging is therefore load-bearing, and
 the exposed global latency in the K loop cannot be bought back by reordering —
 every attempt loses more to issue pressure or occupancy than it gains.
+
+### The floor: nf12 against its bf16t twin over the whole PR #3 grid
+
+Both columns run the *same* kernel, so this ratio is the honest measure of what
+the format buys: nothing but the weight bytes and the decode differ. The target
+is 1.0 everywhere, with 1.3 as the ceiling the byte ratio allows
+(`33.5 / 25.2 = 1.33`); it is a ceiling, not a promise, because a common
+overhead term pulls every cell toward 1.0.
+
+`bf16t / nf12`, cold L2, graph timing, 100 samples per cell:
+
+| k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096×4096 | 1.073 | 1.167 | 1.056 | 1.080 | 1.113 | 1.095 |
+| 4096×14336 | 1.099 | 1.114 | 1.083 | 1.135 | 1.106 | 1.079 |
+| 14336×4096 | 1.095 | 1.033 | 1.032 | 1.122 | 1.158 | 1.102 |
+| 4096×28672 | 1.167 | 1.112 | 1.061 | 1.162 | 1.183 | 1.084 |
+| 5120×25600 | 1.164 | 1.081 | 1.076 | 1.170 | 1.194 | 1.070 |
+| 25600×5120 | 1.166 | 1.071 | 1.064 | 1.122 | 1.077 | 1.099 |
+| 8192×8192 | 1.137 | 1.087 | 1.109 | 1.164 | 1.164 | 1.094 |
+| 2048×8192 | 1.110 | 1.040 | 0.991 | 1.092 | 1.115 | 1.135 |
+| 896×4864 | 1.019 | 1.002 | 0.998 | 1.071 | 1.101 | 1.074 |
+
+Fifty-two of fifty-four cells are at or above parity and the peak is 1.194.
+The two that sit on the line are both `m = 16` on the two smallest weights, and
+they are a genuine tie rather than a regression: at `m = 16` the CTA holds one
+token tile, so a decoded super-atom feeds only four MFMAs and the decode
+latency is the same order as the bytes it saves. `2048×8192` moves 33.6 MB
+against the twin's 41.9 MB, so the 25% byte advantage and the decode cost
+cancel to within a percent. It is also the band with the most run-to-run
+movement (±1%), so those two cells measure between 0.99 and 1.00 from run to
+run.
+
+Two changes took the floor cells up to parity, both trait- and shape-based
+rather than arch-based:
+
+* **Eight warps on the small-M kernel for short K.** `k = 896` is 14 super-atoms,
+  so sixteen warps give each one a single K block and the plane prefetch has
+  nothing to overlap; eight warps give two each. Gated on the token-tile count
+  because from three tiles up the wider CTA measured faster. `m = 1` on
+  `896×4864` went 0.990 → 1.017.
+* **A K split must cover two blocks.** Below that the FP32 partial plane costs
+  more than the extra CTAs buy. This is the `min_iters` floor the OPUS gfx942
+  launch plan applies, and it binds only on short-K shapes: `896×4864` at
+  `m = 32` went 1.064 → 1.094.
 
 **MoE (MI300X, `mixtral-8x7b` E=8 topk=2, uniform routing):** `moe_linear` is
 1087 / 3241 / 11655 µs for `w13` and 585 / 1503 / 4997 µs for `w2` at
