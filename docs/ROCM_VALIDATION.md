@@ -7,24 +7,26 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 ## Test results
 
-| Suite | Device | Passed | Skipped | Deselected |
-| --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 644 | 12 | 1 |
-| Shared API | RTX 4090 | 553 | 16 | 1 |
+| Suite | Device | Passed | Skipped | Deselected | Seconds |
+| --- | --- | ---: | ---: | ---: | ---: |
+| HIP + shared API | R9700 | 644 | 12 | 1 | 41.58 |
+| Shared API | RTX 4090 | 553 | 16 | 1 | 75.81 |
+| Shared API (merged with CUDA master) | RTX 5090 | 558 | 11 | 1 | 113.82 |
 
-Both full suites ran on `5250c61`, including the native MoE align buffer
-validation, out-of-range workspace-query cases, and BF16t MoE metadata guards.
+The R9700 and RTX 4090 suites ran on `5250c61`, including the native MoE align
+buffer validation, out-of-range workspace-query cases, and BF16t metadata guards.
+The RTX 5090 suite used `98c8265` merged with CUDA master `baa1c419`, including
+upstream's SM90/SM120 volatile-assembly fix, with a 4090 as the second GPU.
 
-Both runs use the shared ABI frontend and source-built native and torch libraries,
+All runs use the shared ABI frontend and source-built native and torch libraries,
 with two visible GPUs to exercise concurrent device/stream propagation. The
 backend-neutral cases live in `tests/api` and run on either runtime; `tests/hip`
 holds native `nf12_hip_*`, RDNA4 dispatch and HIP graph cases that have no
-CUDA counterpart. The 4 extra CUDA skips are decode-slice tests whose device
+CUDA counterpart. The 4 extra RTX 4090 skips are decode-slice tests whose device
 selects the fused route instead. The known CUDA MoE
 reference-tolerance case tracked separately in PR #7 is explicitly deselected;
 these counts do not claim it passes. The CUDA-only format-header helper is
 skipped under ROCm; HIP codec/format tests run separately in the same suite.
-RTX 5090 is not claimed validated by these runs.
 
 ## Review regression coverage
 
@@ -94,9 +96,8 @@ context. All three confirmed findings are fixed:
   All 1581056 output elements match the NF12 C-API twin bitwise; all outputs
   are finite and guards are unchanged.
 
-The full HIP run took 41.58 s and the full CUDA run took 75.81 s. Both used
-GIL-disabled Python, two visible devices, and one OMP/MKL thread. These are
-test wall times, not kernel benchmarks.
+The suite durations above are wall times, not kernel benchmarks. All runs used
+GIL-disabled Python, two visible devices, and one OMP/MKL thread.
 
 A separate integration checkout at `8f31489` applied PR #7's test-only correction
 while loading the same native sources (before the additional graph tests). With GIL=0
