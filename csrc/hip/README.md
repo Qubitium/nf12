@@ -589,6 +589,13 @@ entirely. It helps where it applies — `4096×28672` at `m = 64` goes 1.184 →
 costs 5% at `5120×25600` `m = 64` and 28% at `4096×14336` `m = 128` (224 CTAs
 of 256 threads instead of 224 of 512). Not a uniform win, so it is not shipped.
 
+The floor holds outside the PR #3 token grid as well. Measured at
+`m = 2, 4, 96, 256` on `4096×4096`, `5120×25600` and `896×4864`, the minimum is
+**1.013** and no cell is below parity. The peak is higher than the fused band's
+1.19, because `m >= 129` leaves the fused route for decode + rocBLAS:
+**1.511×** at `5120×25600` `m = 256`, **1.354×** at `896×4864` `m = 256` and
+1.241× at `4096×4096` `m = 256`.
+
 **MoE (MI300X, `mixtral-8x7b` E=8 topk=2, uniform routing):** `moe_linear` is
 1087 / 3241 / 11655 µs for `w13` and 585 / 1503 / 4997 µs for `w2` at
 `t = 64 / 256 / 1024` on the fused routed MFMA kernel, **1.01–1.08× faster than
