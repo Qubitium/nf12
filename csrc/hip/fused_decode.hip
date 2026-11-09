@@ -192,7 +192,10 @@ __global__ void __launch_bounds__(kThreads) gate_kernel(GateParams p) {
 
   const uint4* const packed = expert_packed(p.a.w13.packed, p.vecs, e);
   const uint4* const esc = expert_escapes(p.a.w13.escapes, p.a.w13.escape_offsets, e);
-  const uint32_t base_x4 = exp_base_x4(p.a.w13.exp_base[e]);
+  uint32_t base_x4 = 0;
+  if constexpr (S == WeightSource::kNf12) {
+    base_x4 = exp_base_x4(p.a.w13.exp_base[e]);
+  }
   const auto* const x = static_cast<const __hip_bfloat16*>(p.a.x);
 
   gemv_partials<S>(packed, esc, base_x4, p.a.w13.k, nb, x, part[0], lane, warp);
@@ -243,7 +246,10 @@ __global__ void __launch_bounds__(kThreads) down_kernel(DownParams p) {
     } else {
       const uint4* const packed = expert_packed(p.a.w2.packed, p.vecs, e);
       const uint4* const esc = expert_escapes(p.a.w2.escapes, p.a.w2.escape_offsets, e);
-      const uint32_t base_x4 = exp_base_x4(p.a.w2.exp_base[e]);
+      uint32_t base_x4 = 0;
+      if constexpr (S == WeightSource::kNf12) {
+        base_x4 = exp_base_x4(p.a.w2.exp_base[e]);
+      }
       const __hip_bfloat16* const xrow = act + int64_t{j} * p.a.ldactivation;
       gemv_partials<S>(packed, esc, base_x4, p.a.w2.k, nb, xrow, part, lane, warp);
     }

@@ -180,11 +180,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     m0 = rem * 16;
     m = rows;
     route.row_base = start;
-    // Each expert carries its own exponent base, escape slice and packed bytes,
-    // so all three are resolved here rather than by the launcher.
+    // Each expert owns a weight slice; only NF12 carries codec metadata.
     packed += int64_t(e) * route.weight_expert_vecs;
-    base_x4 = exp_base_x4(route.exp_base[e]);
-    if (escapes != nullptr) escapes = escapes + route.escape_offsets[e];
+    base_x4 = 0;
+    if constexpr (S == WeightSource::kNf12) {
+      base_x4 = exp_base_x4(route.exp_base[e]);
+      if (escapes != nullptr) escapes = escapes + route.escape_offsets[e];
+    }
   }
   const int64_t m_local = min(int64_t(kMt * 16), m - m0);
   if (m_local <= 0) return;
