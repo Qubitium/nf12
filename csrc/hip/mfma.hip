@@ -519,12 +519,15 @@ inline MfmaPlan mfma_plan(int64_t m, int64_t n, int64_t k) {
   MfmaPlan p{};
   const int64_t n_tiles = n / kSuperAtomRows;
   const int tiles = static_cast<int>((m + 15) / 16);
-  // A wide N can afford eight column tiles per CTA, which halves the
-  // activation re-read again; a narrow N needs the CTA count more than the
-  // reuse.
-  p.kCols = (n_tiles >= 512 && n_tiles % 8 == 0) ? 8 : ((n_tiles % 4 == 0) ? 4 : 1);
   p.kMt = tiles < kFusedTiles ? tiles : kFusedTiles;
   p.mBlocks = (m + p.kMt * 16 - 1) / (p.kMt * 16);
+  // Eight column tiles per CTA whenever N allows it. The CTA-wide activation
+  // staging is then re-read once per eight stripes instead of four, and that
+  // shared traffic is what otherwise dilutes the packed weight's byte
+  // advantage. A one- or two-tile CTA has too little MFMA per barrier to
+  // amortise the wider staging block, so it keeps four.
+  const bool can_eight = n_tiles % 8 == 0;
+  p.kCols = (can_eight && (n_tiles >= 512 || p.kMt >= 4)) ? 8 : ((n_tiles % 4 == 0) ? 4 : 1);
   p.nGroups = n_tiles / p.kCols;
   // Two CTAs per CU is enough to keep the memory pipe busy; stop there rather
   // than paying for more partial planes than the machine can use.

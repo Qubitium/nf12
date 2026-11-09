@@ -371,12 +371,16 @@ The first CDNA3 cut ran one 16-column weight tile per CTA and walked all
 so at `m = 64` the activations cost 16× the packed weight and the kernel was
 latency-bound rather than bandwidth-bound. `mfma_tile_kernel` fixes both:
 
-* a CTA owns **eight 16-column tiles** (one wave each), and the grid splits K
-  across CTAs, so the machine is filled and the serial walk per wave is
-  `k/64/kSplits` long;
+* a CTA owns **four or eight 16-column tiles** (one wave each) — eight whenever
+  N allows it and the tile is at least four token tiles tall, four otherwise,
+  because a short tile has too little MFMA per barrier to amortise the wider
+  staging block. The grid splits K across CTAs, so the machine is filled and the
+  serial walk per wave is `k/64/kSplits` long;
 * the activation block for the CTA's K step is **staged once in shared memory**,
-  coalesced at 16 B per thread, and shared by all eight waves, which divides the
-  activation traffic by eight;
+  coalesced at 16 B per thread, and shared by every wave, which divides the
+  activation traffic by the column-tile count. That traffic is what dilutes the
+  packed weight's byte advantage, so widening it is worth more than it looks:
+  at `m = 64` it moves nf12/bf16t from 1.07× to 1.09×;
 * the FP32 partial planes of the K splits are summed in ascending split order
   by `mfma_reduce_kernel`, so the result stays deterministic;
 * the next super-atom's packed planes are prefetched a step early, keeping the
@@ -418,17 +422,17 @@ latency, a tall one already has the work and pays for a larger partial plane.
 
 | m | route | nf12 µs | bf16t twin µs | bf16 torch µs |
 | ---: | --- | ---: | ---: | ---: |
-| 1 | fused GEMV (16 groups) | 10.8 | 11.4 | 14.3 |
-| 16 | fused MFMA | 21.2 | 21.6 | 15.0 |
-| 32 | fused MFMA | 23.9 | 25.3 | 15.8 |
-| 64 | fused MFMA | 26.2 | 28.0 | 17.8 |
-| 128 | fused MFMA | 36.7 | 38.8 | 22.0 |
-| 256 | decode + rocBLAS | 47.2 | 69.4 | 32.6 |
+| 1 | fused GEMV (16 groups) | 10.8 | 11.4 | 14.2 |
+| 16 | fused MFMA | 21.2 | 21.6 | 14.8 |
+| 32 | fused MFMA | 24.0 | 25.3 | 15.7 |
+| 64 | fused MFMA | 25.8 | 28.2 | 17.6 |
+| 128 | fused MFMA | 35.5 | 38.3 | 22.0 |
+| 256 | decode + rocBLAS | 46.9 | 70.1 | 33.1 |
 
 That is 8.2× faster than the first CDNA3 cut at `m = 64` (215.5 µs) and 4.9× at
 `m = 128` (178.1 µs). The nf12/bf16t column is the honest measure of what the
 format buys, because both run the same kernel: nf12 now wins every shape in the
-PR #3 grid, **1.02–1.14×**, because it reads a quarter fewer weight bytes and
+PR #3 grid, **1.02–1.15×**, because it reads a quarter fewer weight bytes and
 the decode is amortised over the whole CTA. Against `torch.matmul` on the dense
 BF16 weight nf12 wins only at `m = 1` (1.32×); above that the fused decode
 cannot match rocBLAS, which reads the weight once and has almost no activation
