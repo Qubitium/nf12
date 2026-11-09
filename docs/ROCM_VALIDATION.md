@@ -19,11 +19,11 @@ reports; no code path branches on it.
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
 | HIP + shared API | R9700 | 692 | 12 | 1 |
-| HIP + shared API | MI300X (`gfx942`) | 604 | 31 | 0 |
+| HIP + shared API | MI300X (`gfx942`) | 667 | 43 | 0 |
 | Shared API | RTX 4090 | 447 | 13 | 1 |
 
-The MI300X run is `tests/api` + `tests/hip` on one visible device. Of the 31
-skips, 18 are the RDNA4-only WMMA plan tests (`wmma_hip_*`, which gate on
+The MI300X run is `tests/api` + `tests/hip` on one visible device. Of the 43
+skips, most are the RDNA4-only WMMA plan tests (`wmma_hip_*`, which gate on
 `nf12_hip_wmma_supported`), 4 are the decode-slice budget on a device whose
 matrix core covers all M, and the rest are existing shape/arch guards.
 Accuracy on `gfx942`: the nf12 and bf16t twins are bit-identical across

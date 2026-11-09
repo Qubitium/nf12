@@ -355,27 +355,53 @@ Hardware-derived facts recorded here so they are not re-litigated:
   memory. The row stride is padded by 4 BF16 so the 16 rows land on 16 distinct
   bank pairs (at the unpadded 64 BF16 every row started on bank 0).
 
-**Correctness on `gfx942`:** the full shared suite (`tests/api`, 448 tests) and
-the HIP suite (`tests/hip`, 151 tests) pass. The nf12 and bf16t twins are
+**Correctness on `gfx942`:** the full shared suite (`tests/api`) and the HIP
+suite (`tests/hip`) pass: 667 passed, 43 skipped. The nf12 and bf16t twins are
 bit-identical across `m = 1 … 1024` and `k = 64 … 4096`, including the partial
 tail tiles (`m = 17, 129, 257, 1000, …`), and both stay inside the SPEC §6.2
 tolerance against the reference.
 
-**Dense linear (MI300X), warm µs, `n=4096 k=4096`:**
+### How the dense kernel is shaped
 
-| m | route | nf12 µs | decode + rocBLAS µs | ratio |
+The first CDNA3 cut ran one 16-column weight tile per CTA and walked all
+`k/64` super-atoms serially. On a 304-CU part that exposes only `n/16` CTAs
+(256 at `n = 4096`) and every one of them re-reads the whole activation matrix,
+so at `m = 64` the activations cost 16× the packed weight and the kernel was
+latency-bound rather than bandwidth-bound. `mfma_tile_kernel` fixes both:
+
+* a CTA owns **eight 16-column tiles** (one wave each), and the grid splits K
+  across CTAs, so the machine is filled and the serial walk per wave is
+  `k/64/kSplits` long;
+* the activation block for the CTA's K step is **staged once in shared memory**,
+  coalesced at 16 B per thread, and shared by all eight waves, which divides the
+  activation traffic by eight;
+* the FP32 partial planes of the K splits are summed in ascending split order
+  by `mfma_reduce_kernel`, so the result stays deterministic;
+* the next super-atom's packed planes are prefetched a step early, keeping the
+  packed-weight latency off the critical path.
+
+The packed weight is still never materialised. `kSplits` follows the tile
+height: a short tile has fewer MFMA per barrier and needs more CTAs to hide
+latency, a tall one already has the work and pays for a larger partial plane.
+
+**Dense linear (MI300X), cold-L2 µs, `n=4096 k=4096`:**
+
+| m | route | nf12 µs | bf16t twin µs | bf16 torch µs |
 | ---: | --- | ---: | ---: | ---: |
-| 1 | fused GEMV | 74.9 | 34.6 | 2.17 |
-| 16 | fused MFMA (contract band) | 78.0 | 34.8 | 2.24 |
-| 64 | fused MFMA (contract band) | 213.2 | 31.3 | 6.82 |
-| 256 | decode + rocBLAS | 47.3 | 46.0 | 1.03 |
-| 1024 | decode + rocBLAS | 85.9 | 92.2 | 0.93 |
-| 4096 | decode + rocBLAS | 260.3 | 246.9 | 1.05 |
+| 1 | fused GEMV | 13.2 | 11.4 | 14.2 |
+| 16 | fused MFMA | 22.4 | 22.0 | 14.9 |
+| 32 | fused MFMA | 25.2 | 25.1 | 15.8 |
+| 64 | fused MFMA | 27.9 | 27.1 | 17.7 |
+| 128 | fused MFMA | 38.1 | 38.1 | 21.9 |
+| 256 | decode + rocBLAS | 44.9 | — | 28.0 |
 
-Above the small-M band the routed decode + rocBLAS path is at parity with
-rocBLAS on the already-decoded weight; it is not slower. The fused MFMA kernel
-is deliberately not used there — it was 13–18× off rocBLAS on this part because
-each 16-column stripe re-reads the whole activation matrix.
+That is 7.7× faster than the first CDNA3 cut at `m = 64` (215.5 µs) and 4.7× at
+`m = 128` (178.1 µs). The nf12/bf16t column is the honest measure of what the
+format buys, because both run the same kernel: nf12 is at parity (0.97–1.00×)
+and the remaining gap is the decode arithmetic, not the bytes. Against
+`torch.matmul` on the dense BF16 weight nf12 wins only at `m = 1` (1.08×); above
+that the fused decode cannot match rocBLAS, which reads the weight once and has
+almost no activation traffic.
 
 **MoE (MI300X), `E=8 N=K=4096 topk=2`:** `moe_linear` is 142 / 207 / 469 µs at
 `t = 64 / 256 / 1024` on the fused routed MFMA kernel. At `t = 1024` the
