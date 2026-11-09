@@ -7,6 +7,7 @@
 // Analyze chooses the smallest base with minimum escapes; count/scan/write
 // preserve the reference's packed bytes and flat-group escape order.
 #include "format_hip.cuh"
+#include "../validation.h"
 
 #include "nf12/nf12_hip.h"
 
@@ -236,6 +237,7 @@ int64_t g_num_units(int64_t n, int64_t k) { return num_units(num_super_atoms(n, 
 extern "C" {
 
 size_t nf12_hip_encode_workspace_bytes(int64_t n, int64_t k) {
+  if (!nf12::validation::valid_shape(n, k)) return 0;
   const size_t unit_bytes = sizeof(uint64_t) * size_t(g_num_units(n, k) + 1);
   return std::max(kAnalyzeWorkspaceBytes, (unit_bytes + 15) & ~size_t(15));
 }
@@ -243,17 +245,18 @@ size_t nf12_hip_encode_workspace_bytes(int64_t n, int64_t k) {
 hipError_t nf12_hip_encode_analyze(const void* w_in, int64_t n, int64_t k, int64_t ldw, void* workspace,
                                   size_t workspace_bytes, uint8_t* exp_base_out,
                                   uint32_t* num_escapes_out, hipStream_t stream) {
+  using namespace nf12::validation;
   // SPEC.md 4 geometry. Without this a k that is not a multiple of 64 is
   // truncated by k / kSuperAtomCols and the encoder silently writes a matrix
   // covering only part of the caller's K, which then reads back as garbage.
-  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldw < k) {
+  if (!valid_shape(n, k) || !valid_bf16_matrix(w_in, k, ldw)) {
     return hipErrorInvalidValue;
   }
   // The workspace is the caller's buffer: the histogram below is memset and
   // then written by the analyze kernel, so a short or null buffer must be
   // rejected before any device write. The C-ABI wrapper maps this to
   // NF12_ERROR_INSUFFICIENT_WORKSPACE, matching the CUDA build.
-  if (exp_base_out == nullptr || num_escapes_out == nullptr || workspace == nullptr ||
+  if (exp_base_out == nullptr || num_escapes_out == nullptr || !valid_workspace(workspace, workspace_bytes) ||
       workspace_bytes < nf12_hip_encode_workspace_bytes(n, k)) {
     return hipErrorInvalidValue;
   }
@@ -299,12 +302,14 @@ hipError_t nf12_hip_encode_analyze(const void* w_in, int64_t n, int64_t k, int64
 hipError_t nf12_hip_encode(const void* w_in, int64_t n, int64_t k, int64_t ldw, uint8_t exp_base,
                           uint8_t* packed, uint4* escapes, uint32_t escapes_capacity,
                           void* workspace, size_t workspace_bytes, hipStream_t stream) {
-  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldw < k) {
+  using namespace nf12::validation;
+  if (!valid_shape(n, k) || !valid_bf16_matrix(w_in, k, ldw)) {
     return hipErrorInvalidValue;
   }
   const auto* w = reinterpret_cast<const __hip_bfloat16*>(w_in);
   if (exp_base > kMaxExpBase) return hipErrorInvalidValue;
-  if (packed == nullptr || workspace == nullptr ||
+  if (packed == nullptr || !aligned16(packed) || !aligned16(escapes) ||
+      !valid_workspace(workspace, workspace_bytes) ||
       workspace_bytes < nf12_hip_encode_workspace_bytes(n, k)) {
     return hipErrorInvalidValue;
   }

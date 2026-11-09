@@ -616,9 +616,13 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   if constexpr (Src == WeightSource::kNf12) {
     if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   }
+  using namespace nf12::validation;
   // Both strides are used as k / 64 and n / 16 below, so a shape that is not a
   // multiple would truncate rather than fail.
-  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0) {
+  if (!valid_shape(n, k) || packed == nullptr || !aligned16(packed) ||
+      !aligned16(escapes) || !valid_bf16_matrix(x, k, ldx) ||
+      !valid_bf16_matrix(out, n, ldy) || (bias != nullptr && !aligned16(bias)) ||
+      !valid_workspace(workspace, workspace_bytes)) {
     return hipErrorInvalidValue;
   }
 
@@ -653,7 +657,7 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   float* partial = nullptr;
   if (splits > 1) {
     const size_t needed = nf12_hip_linear_wmma_workspace_bytes(n, k, m);
-    if (workspace == nullptr || workspace_bytes < needed) return hipErrorInvalidValue;
+    if (workspace_bytes < needed) return hipErrorInvalidValue;
     partial = static_cast<float*>(workspace);
   }
 
@@ -866,8 +870,9 @@ int nf12_hip_wmma_supported(int64_t m) {
 
 
 size_t nf12_hip_linear_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
+  if (!nf12::validation::valid_shape(n, k) || m < 16 || m > nf12_hip_wmma_max_m()) return 0;
   const WmmaPlan plan = wmma_plan(n, k, m);
-  if (plan.splits <= 1 || m <= 0 || n <= 0) return 0;
+  if (plan.splits <= 1) return 0;
   return size_t(plan.splits) * size_t(m) * size_t(n) * sizeof(float);
 }
 

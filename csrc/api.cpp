@@ -20,10 +20,6 @@ bool valid_weight(const nf12_weight_t* w) {
          w->exp_base <= kMaxExpBase && aligned16(w->escapes) && (w->num_escapes == 0 || w->escapes != nullptr);
 }
 
-bool valid_workspace(const void* workspace, size_t bytes) {
-  return bytes == 0 || (workspace != nullptr && aligned16(workspace));
-}
-
 nf12_status_t current_device(int* device) {
   bool supported = false;
   const cudaError_t err = nf12::backend::current_device(device, &supported);

@@ -21,7 +21,6 @@ import nf12
 import pytest
 import torch
 import torch.nn.functional as F
-from nf12 import reference
 
 
 def _arch() -> str:
@@ -77,6 +76,8 @@ def lib():
     lib.nf12_hip_decode.argtypes = [
         _VOID, _VOID, _U8, _I64, _I64, _VOID, _I64, _VOID,
     ]
+    lib.nf12_hip_unpack_bf16t.restype = _INT
+    lib.nf12_hip_unpack_bf16t.argtypes = [_VOID, _I64, _I64, _VOID, _I64, _VOID]
     lib.nf12_hip_selftest.restype = _INT
     lib.nf12_hip_selftest.argtypes = [_VOID, _VOID]
     lib.nf12_hip_linear_fused_small_m_supported.restype = _INT
@@ -135,6 +136,66 @@ def lib():
 
 def _stream() -> int:
     return torch.cuda.current_stream().cuda_stream
+
+
+@pytest.mark.parametrize("op,bad", [
+    ("decode", "packed"), ("decode", "out"), ("decode", "out_align"),
+    ("decode", "stride"), ("unpack", "packed"), ("unpack", "out"),
+    ("unpack", "stride"), ("analyze", "w"), ("analyze", "w_align"),
+    ("analyze", "stride"), ("analyze", "workspace_align"),
+    ("encode", "w"), ("encode", "packed"), ("encode", "escapes_align"),
+    ("encode", "stride"), ("encode", "workspace"),
+    ("fused", "packed"), ("fused", "x"), ("fused", "out"),
+    ("fused", "bias_align"), ("fused_twin", "packed"),
+    ("fused_twin", "x"), ("wmma", "packed"), ("wmma", "x"),
+    ("wmma", "out"), ("wmma", "workspace_align"),
+])
+def test_native_entries_reject_invalid_buffers_before_launch(lib, op, bad):
+    """Native HIP calls obey the shared C ABI's alignment and stride rules."""
+    n, k, m, ld = 16, 64, 16, 72
+    w = torch.ones((n, ld), dtype=torch.bfloat16, device="cuda")
+    x = torch.ones((m, ld), dtype=torch.bfloat16, device="cuda")
+    out = torch.full((m, ld), -7., dtype=torch.bfloat16, device="cuda")
+    packed = torch.empty(n * k * 2, dtype=torch.uint8, device="cuda")
+    escapes = torch.empty(32, dtype=torch.uint8, device="cuda")
+    bias = torch.empty(32, dtype=torch.bfloat16, device="cuda")
+    need = max(lib.nf12_hip_encode_workspace_bytes(n, k),
+               lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m))
+    workspace = torch.empty(need + 16, dtype=torch.uint8, device="cuda")
+    p = {"w": w.data_ptr(), "x": x.data_ptr(), "out": out.data_ptr(),
+         "packed": packed.data_ptr(), "escapes": escapes.data_ptr(),
+         "bias": bias.data_ptr(), "workspace": workspace.data_ptr()}
+    stride = ld
+    if bad == "stride":
+        stride = 65
+    elif bad in p:
+        p[bad] = None
+    elif bad.endswith("_align"):
+        p[bad.removesuffix("_align")] += 2
+    base, count = _U8(), _U32()
+    stream = _stream()
+    if op == "decode":
+        rc = lib.nf12_hip_decode(p["packed"], p["escapes"], 0, n, k, p["out"], stride, stream)
+    elif op == "unpack":
+        rc = lib.nf12_hip_unpack_bf16t(p["packed"], n, k, p["out"], stride, stream)
+    elif op == "analyze":
+        rc = lib.nf12_hip_encode_analyze(p["w"], n, k, stride, p["workspace"], need,
+                                        ctypes.byref(base), ctypes.byref(count), stream)
+    elif op == "encode":
+        rc = lib.nf12_hip_encode(p["w"], n, k, stride, 0, p["packed"], p["escapes"], 1,
+                                p["workspace"], need, stream)
+    elif op == "fused":
+        rc = lib.nf12_hip_linear_fused(p["packed"], p["escapes"], 0, p["x"], p["out"],
+                                      n, k, 1, p["bias"], stream)
+    elif op == "fused_twin":
+        rc = lib.nf12_hip_linear_fused_bf16t(p["packed"], p["x"], p["out"], n, k, 1,
+                                             p["bias"], stream)
+    else:
+        rc = lib.nf12_hip_linear_wmma(p["packed"], p["escapes"], 0, p["x"], p["out"],
+                                      n, k, m, p["bias"], p["workspace"], need, stream)
+    assert rc == 1  # hipErrorInvalidValue; no asynchronous GPU fault
+    torch.cuda.synchronize()
+    assert bool((out == -7).all())
 
 
 def _encode(lib, w: torch.Tensor):

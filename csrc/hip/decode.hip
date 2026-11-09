@@ -26,6 +26,7 @@
 // ---------------------------------------------------------------------------
 #include "format_hip.cuh"
 #include "linear.h"
+#include "../validation.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -228,10 +229,13 @@ template <WeightSource S>
 hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                         const void* x, void* out, int64_t n, int64_t k, int64_t m,
                         const void* bias, hipStream_t stream, int64_t ldx, int64_t ldy) {
+  using namespace nf12::validation;
   if (m < 1 || m > kFusedMaxM) return hipErrorInvalidValue;
   // n / 16 below would otherwise round a 24-row weight down to one 16-row block
   // and write only part of the caller's output.
-  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0) {
+  if (!valid_shape(n, k) || packed == nullptr || !aligned16(packed) ||
+      !aligned16(escapes) || !valid_bf16_matrix(x, k, ldx) ||
+      !valid_bf16_matrix(out, n, ldy) || (bias != nullptr && !aligned16(bias))) {
     return hipErrorInvalidValue;
   }
   const int64_t blocks = n / kSuperAtomRows;
@@ -295,11 +299,13 @@ extern "C" {
 hipError_t nf12_hip_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                           int64_t n, int64_t k, void* out, int64_t ldo,
                           hipStream_t stream) {
+  using namespace nf12::validation;
   __hip_bfloat16* out_bf16 = reinterpret_cast<__hip_bfloat16*>(out);
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   // SPEC.md 4 geometry; n / 16 and k / 64 below would otherwise truncate and
   // decode a smaller matrix than the caller asked for.
-  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldo < k) {
+  if (!valid_shape(n, k) || packed == nullptr || !aligned16(packed) ||
+      !aligned16(escapes) || !valid_bf16_matrix(out, k, ldo)) {
     return hipErrorInvalidValue;
   }
   const int64_t num_sa = (n / kSuperAtomRows) * (k / kSuperAtomCols);
@@ -317,8 +323,10 @@ hipError_t nf12_hip_decode(const uint8_t* packed, const uint4* escapes, uint32_t
 // exp_base: the super-atom is already the decoded register image.
 hipError_t nf12_hip_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* out,
                                  int64_t ldo, hipStream_t stream) {
+  using namespace nf12::validation;
   __hip_bfloat16* out_bf16 = reinterpret_cast<__hip_bfloat16*>(out);
-  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0 || ldo < k) {
+  if (!valid_shape(n, k) || packed == nullptr || !aligned16(packed) ||
+      !valid_bf16_matrix(out, k, ldo)) {
     return hipErrorInvalidValue;
   }
   const int64_t num_sa = (n / kSuperAtomRows) * (k / kSuperAtomCols);
@@ -343,6 +351,8 @@ __global__ void selftest_kernel(uint32_t* out) {
 }  // namespace
 
 hipError_t nf12_hip_selftest(uint32_t* out, hipStream_t stream) {
+  if (out == nullptr || !nf12::validation::aligned(out, alignof(uint32_t)))
+    return hipErrorInvalidValue;
   selftest_kernel<<<1, 32, 0, stream>>>(out);
   return hipGetLastError();
 }

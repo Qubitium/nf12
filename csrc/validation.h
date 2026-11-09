@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <limits>
 
 namespace nf12::validation {
@@ -23,6 +24,10 @@ inline bool valid_moe_shape(int64_t experts, int64_t n, int64_t k) {
 // Row-major BF16 accessed with 16-byte vectors; callers also bound row counts.
 inline bool valid_bf16_matrix(const void* p, int64_t cols, int64_t ld) {
   return p != nullptr && aligned16(p) && ld >= cols && ld % 8 == 0;
+}
+
+inline bool valid_workspace(const void* workspace, size_t bytes) {
+  return bytes == 0 || (workspace != nullptr && aligned16(workspace));
 }
 
 inline bool valid_moe_linear_buffers(const void* x, int64_t ldx, const int32_t* gather,
