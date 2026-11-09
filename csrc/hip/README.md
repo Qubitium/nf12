@@ -358,7 +358,7 @@ Hardware-derived facts recorded here so they are not re-litigated:
   bank pairs (at the unpadded 64 BF16 every row started on bank 0).
 
 **Correctness on `gfx942`:** the full shared suite (`tests/api`) and the HIP
-suite (`tests/hip`) pass: 667 passed, 43 skipped. The nf12 and bf16t twins are
+suite (`tests/hip`) pass: 591 passed, 27 skipped. The nf12 and bf16t twins are
 bit-identical across `m = 1 … 1024` and `k = 64 … 4096`, including the partial
 tail tiles (`m = 17, 129, 257, 1000, …`), and both stay inside the SPEC §6.2
 tolerance against the reference.

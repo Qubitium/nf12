@@ -18,14 +18,16 @@ reports; no code path branches on it.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 692 | 12 | 1 |
-| HIP + shared API | MI300X (`gfx942`) | 667 | 43 | 0 |
-| Shared API | RTX 4090 | 447 | 13 | 1 |
+| HIP + shared API | R9700 | 600 | 12 | 1 |
+| HIP + shared API | MI300X (`gfx942`) | 591 | 27 | 0 |
+| Shared API | RTX 4090 | 545 | 16 | 1 |
 
-The MI300X run is `tests/api` + `tests/hip` on one visible device. Of the 43
-skips, most are the RDNA4-only WMMA plan tests (`wmma_hip_*`, which gate on
-`nf12_hip_wmma_supported`), 4 are the decode-slice budget on a device whose
-matrix core covers all M, and the rest are existing shape/arch guards.
+The R9700 and 4090 rows are the counts the base branch records; only the MI300X
+row was re-measured here, because that is the device this branch adds. It is
+`tests/api` + `tests/hip` on one visible device. Of the 27 skips, 7 are the
+RDNA4-only WMMA plan and graph tests, which gate on
+`nf12_hip_wmma_supported`; the rest are the existing shape/arch guards plus the
+Hugging Face cache, huge-test, two-device and CUDA-format-helper skips.
 Accuracy on `gfx942`: the nf12 and bf16t twins are bit-identical across
 `m = 1 … 1024` and `k = 64 … 4096` (including the partial tail tiles), and both
 meet the SPEC §6.2 gate against the reference.
