@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.26)
 # WGMMA, tcgen05 and SM120 TMA/setmaxnreg require architecture-specific cubins.
 # Runtime probes reject loaded images without those feature paths.
 # Embed generic PTX for the highest target so newer GPUs can JIT.
-set(NF12_CUDA_ARCHS "80;86;89;90;100;110;120" CACHE STRING "CUDA architectures to build for")
+set(NF12_CUDA_ARCHS "80;86;89;90;100;103;110;120" CACHE STRING "CUDA architectures to build for")
 if(DEFINED ENV{NF12_CUDA_ARCHS} AND NOT "$ENV{NF12_CUDA_ARCHS}" STREQUAL "")
   set(NF12_CUDA_ARCHS "$ENV{NF12_CUDA_ARCHS}" CACHE STRING "CUDA architectures to build for" FORCE)
 endif()

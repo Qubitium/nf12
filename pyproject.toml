@@ -39,7 +39,7 @@ wheel.py-api = "py3"
 sdist.exclude = [".venv", "build"]
 
 [tool.scikit-build.cmake.define]
-NF12_CUDA_ARCHS = { env = "NF12_CUDA_ARCHS", default = "80;86;89;90;100;110;120" }
+NF12_CUDA_ARCHS = { env = "NF12_CUDA_ARCHS", default = "80;86;89;90;100;103;110;120" }
 NF12_BUILD_NATIVE = { env = "NF12_BUILD_NATIVE", default = "ON" }
 
 [tool.pytest.ini_options]

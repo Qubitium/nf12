@@ -24,7 +24,7 @@ described in the paper. You can read [the spec](docs/SPEC.md) for more info on t
 uv pip install nf12
 ```
 
-Linux x86-64 and ARM64 wheels include kernels for SM80, 86, 89, 90, 100, 110,
+Linux x86-64 and ARM64 wheels include kernels for SM80, 86, 89, 90, 100, 103, 110,
 and 120. They bundle the CUDA 13 runtime and require a compatible NVIDIA driver.
 
 From source:
