@@ -515,7 +515,6 @@ struct MfmaPlan {
 };
 
 inline MfmaPlan mfma_plan(int64_t m, int64_t n, int64_t k) {
-  (void)k;
   MfmaPlan p{};
   const int64_t n_tiles = n / kSuperAtomRows;
   const int tiles = static_cast<int>((m + 15) / 16);
@@ -529,14 +528,20 @@ inline MfmaPlan mfma_plan(int64_t m, int64_t n, int64_t k) {
   const bool can_eight = n_tiles % 8 == 0;
   p.kCols = (can_eight && (n_tiles >= 512 || p.kMt >= 4)) ? 8 : ((n_tiles % 4 == 0) ? 4 : 1);
   p.nGroups = n_tiles / p.kCols;
-  // Two CTAs per CU is enough to keep the memory pipe busy; stop there rather
-  // than paying for more partial planes than the machine can use.
-  constexpr int64_t kTargetCtas = 2 * 304;
-  // Enough CTAs per CU to keep the memory pipe busy, without paying for a
-  // partial plane bigger than the work it splits. A wide N already supplies
-  // the CTAs; a tall tile (kMt > 2) has more MFMA per barrier and needs fewer.
-  p.kSplits = (p.nGroups >= 128) ? 4 : (p.kMt <= 2 ? 16 : 8);
-  while (p.kSplits > 1 && p.nGroups * p.mBlocks * p.kSplits > 2 * kTargetCtas) p.kSplits /= 2;
+  // Enough concurrent CTAs to keep the memory pipe busy, and no more: every
+  // extra split re-reads the whole activation block and adds another plane of
+  // FP32 partials (m*n*4 bytes each), which is the shared cost that dilutes the
+  // packed weight's byte advantage.
+  //
+  // A short tile (kMt <= 2) is small enough that several CTAs fit on a CU and
+  // each does little work, so it needs more of them. A tall tile already
+  // occupies half or all of a CU's shared memory and does proportionally more
+  // MFMA per barrier, so it saturates with fewer.
+  const int64_t target = p.kMt <= 2 ? 512 : (p.kMt <= 6 ? 256 : 224);
+  int64_t splits = 1;
+  while (p.nGroups * p.mBlocks * splits < target) splits <<= 1;
+  const int64_t k_blocks = k / kSuperAtomCols;
+  p.kSplits = static_cast<int>(std::min<int64_t>(splits, std::max<int64_t>(k_blocks, 1)));
   return p;
 }
 
