@@ -87,6 +87,13 @@ def test_native_moe_align_empty_input_writes_zero_offsets(abi):
     assert bool((offsets == 0).all())
 
 
+@pytest.mark.parametrize("assignments,experts", [
+    (2**31, 1), (1, 2**31), (2**63 - 1, 2**63 - 1),
+])
+def test_native_moe_align_workspace_rejects_out_of_range_counts(abi, assignments, experts):
+    assert abi.nf12_hip_moe_align_workspace_bytes(assignments, experts) == 0
+
+
 @pytest.mark.parametrize("twin", [False, True])
 # The rest of the invalid-argument matrix runs against the shared ABI in
 # tests/api/test_moe.py::test_c_linear_validation; these are the native-only gaps.

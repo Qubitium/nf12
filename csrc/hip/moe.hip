@@ -400,7 +400,10 @@ AlignPlan align_plan(int64_t num_assignments, int64_t num_experts) {
 }  // namespace
 
 size_t nf12_hip_moe_align_workspace_bytes(int64_t num_assignments, int64_t num_experts) {
-  if (num_assignments <= 0 || num_experts < 1) return 0;
+  if (num_assignments <= 0 || num_assignments > 0x7fffffffLL ||
+      num_experts < 1 || num_experts > 0x7fffffffLL) {
+    return 0;
+  }
   return align_plan(num_assignments, num_experts).bytes;
 }
 
