@@ -67,6 +67,11 @@ hipError_t nf12_hip_linear_fused_bf16t(const uint8_t* packed, const void* x, voi
 int nf12_hip_wmma_max_m(void);
 int nf12_hip_wmma_supported(int64_t m);
 
+/* Device-parameterised form: the same query for an explicit device ordinal.
+ * The op layer uses it to route a non-WMMA device to decode+GEMM without
+ * switching the caller's current device. */
+int nf12_hip_wmma_supported_device(int64_t m, int device);
+
 /* Device scratch for the split-K reduction, owned by the caller. Returns 0 when
  * the launch chosen for (n, k, m) needs no scratch.
  *
@@ -88,8 +93,11 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes,
                                 void* workspace, size_t workspace_bytes,
                                 hipStream_t stream);
 
-/* bf16t twin of the matrix-core route. Takes any m >= 16 and needs no
- * workspace (the twin runs one K pass). */
+/* bf16t twin of the matrix-core route. Runs the identical (tiles, splits) plan
+ * as nf12_hip_linear_wmma so the two are bitwise comparable, which means it
+ * needs the same split-K partial plane: size it with
+ * nf12_hip_linear_wmma_workspace_bytes(n, k, min(m, nf12_hip_wmma_max_m())).
+ * Any m >= 16 is accepted; above nf12_hip_wmma_max_m() the M axis is chunked. */
 hipError_t nf12_hip_linear_wmma_bf16t(const uint8_t* packed, const void* x, void* out,
                                       int64_t n, int64_t k, int64_t m, const void* bias,
                                       void* workspace, size_t workspace_bytes,
