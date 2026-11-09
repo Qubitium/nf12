@@ -110,10 +110,11 @@ nf12_status_t nf12_decode(const nf12_weight_t* w, void* out_bf16, int64_t ldo, c
 
 size_t nf12_linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int) {
   if (m <= 0 || !valid_shape(n, k)) return 0;
-  // Above the matrix-core M cap the launch is a sequence of chunk-sized
-  // launches, so only the largest chunk needs a partial plane.
-  const int64_t chunk = m < nf12_hip_wmma_max_m() ? m : nf12_hip_wmma_max_m();
-  return nf12_hip_linear_wmma_workspace_bytes(n, k, chunk);
+  // Splits depend on M: a short tail can need more workspace than a full
+  // chunk. Reserve the maximum before launching anything (CUDA ABI contract).
+  const int64_t cap = nf12_hip_wmma_max_m();
+  return std::max(nf12_hip_linear_wmma_workspace_bytes(n, k, std::min(m, cap)),
+                  nf12_hip_linear_wmma_workspace_bytes(n, k, m % cap));
 }
 
 nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w,
