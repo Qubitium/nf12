@@ -36,6 +36,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include <algorithm>
 #include <cstdint>
 
 namespace nf12_hip {
@@ -66,15 +67,15 @@ using MfmaA = short __attribute__((ext_vector_type(4)));
 using MfmaD = float __attribute__((ext_vector_type(4)));
 
 __device__ __forceinline__ MfmaD mfma(MfmaA a, MfmaA b, MfmaD c) {
-#if defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__) || defined(__gfx940__)
-  return __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, c, 0, 0, 0);
-#else
-  // Not a CDNA3 target: the dispatcher never selects this kernel, but the
-  // symbol has to exist so host and device agree. Return c untouched.
+  // Compile-time ISA query, not an arch string. A target without this matrix
+  // core falls through to `c`; the trait-based dispatcher never selects the
+  // kernel there, and the symbol still exists so host and device agree.
+  if (__builtin_amdgcn_is_invocable(__builtin_amdgcn_mfma_f32_16x16x16bf16_1k)) {
+    return __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, c, 0, 0, 0);
+  }
   (void)a;
   (void)b;
   return c;
-#endif
 }
 
 // Decode super-atom `sa` (16 weight rows x 64 K) into a rowwise shared tile.
@@ -155,9 +156,9 @@ __global__ void __launch_bounds__(kThreads)
   int64_t m0 = int64_t(blockIdx.y) * (kMt * 16);
   MfmaRoute route = route_in;
   if constexpr (kRouted) {
-    // blockIdx.y flattens (expert, 16-assignment tile). Counts are device-side,
-    // so scan the clamped offsets; surplus CTAs return before touching memory.
-    int64_t rem = int64_t(blockIdx.y);
+    // grid.y/z flatten (expert, 16-assignment tile). Counts are device-side, so
+    // scan the clamped offsets; surplus CTAs return before touching memory.
+    int64_t rem = int64_t(blockIdx.z) * gridDim.y + blockIdx.y;
     int64_t start = 0, rows = 0;
     int64_t l = moe_next_offset(route.expert_offsets[0], 0, route.max_assignments);
     int32_t e = 0;
@@ -318,7 +319,7 @@ hipError_t linear_launch(const uint8_t* packed, const uint4* escapes, uint32_t e
   return hipGetLastError();
 }
 
-// Routed launcher. blockIdx.y enumerates the flattened (expert, tile) space, so
+// Routed launcher. grid.y/z enumerate the flattened (expert, tile) space, so
 // the grid is the worst-case bound and surplus CTAs exit before reading.
 template <WeightSource S>
 hipError_t moe_launch(const uint8_t* packed, const uint4* escapes, const int64_t* escape_offsets,
@@ -330,7 +331,9 @@ hipError_t moe_launch(const uint8_t* packed, const uint4* escapes, const int64_t
   const int64_t n_blocks = (n / kSuperAtomRows + kWavesPerBlock - 1) / kWavesPerBlock;
   const int64_t m_tiles = (max_assignments + 15) / 16 + num_experts;
   if (n_blocks == 0) return hipSuccess;
-  if (n_blocks > kMaxGridX || m_tiles > kMaxGridY) return hipErrorNotSupported;
+  const int64_t grid_y = std::min(m_tiles, kMaxGridY);
+  const int64_t grid_z = (m_tiles + grid_y - 1) / grid_y;
+  if (n_blocks > kMaxGridX || grid_z > kMaxGridY) return hipErrorNotSupported;
 
   MfmaRoute route{};
   route.gather = gather;
@@ -346,7 +349,8 @@ hipError_t moe_launch(const uint8_t* packed, const uint4* escapes, const int64_t
   route.weight_expert_vecs = (n / kSuperAtomRows) * (k / kSuperAtomCols) * SourceTraits<S>::kVecs;
   route.num_experts = num_experts;
 
-  const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_tiles), 1);
+  const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(grid_y),
+                  static_cast<unsigned>(grid_z));
   mfma_kernel<S, true, 1><<<grid, kThreads, 0, stream>>>(
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), escapes, 0u,
       n, k, 0, reinterpret_cast<__hip_bfloat16*>(out), nullptr, route);
