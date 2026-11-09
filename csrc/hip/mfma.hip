@@ -571,6 +571,16 @@ inline MfmaPlan mfma_plan(int64_t m, int64_t n, int64_t k) {
   while (p.nGroups * p.mBlocks * splits < target) splits <<= 1;
   const int64_t k_blocks = k / kSuperAtomCols;
   p.kSplits = static_cast<int>(std::min<int64_t>(splits, std::max<int64_t>(k_blocks, 1)));
+  // A split must cover at least two K blocks to earn its partial plane. Below
+  // that the plane (m*n*4 bytes written and read) is a larger share of the
+  // traffic than the extra CTAs buy back; this is the same floor the OPUS
+  // gfx942 launch plan applies (`min_iters`). It binds on short-K shapes
+  // (k = 896 gives 14 K blocks, so eight splits is under two iterations each).
+  //
+  // Only for a CTA that batches token tiles: a one-tile CTA has so little work
+  // per split that the extra CTAs are what fills the machine, and halving them
+  // measured 12% slower at m = 8 on the 896x4864 shape.
+  while (p.kMt >= 2 && p.kSplits > 1 && k_blocks / p.kSplits < 2) p.kSplits >>= 1;
   return p;
 }
 
