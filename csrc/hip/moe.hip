@@ -408,18 +408,21 @@ hipError_t nf12_hip_moe_align(const int32_t* topk_ids, int64_t num_tokens, int64
                               int64_t num_experts, int32_t* sorted_out,
                               int64_t* expert_offsets_out, void* workspace,
                               size_t workspace_bytes, hipStream_t stream) {
+  using namespace nf12::validation;
   if (num_tokens < 0 || topk < 1 || num_experts < 1 || num_experts > 0x7fffffffLL) {
     return hipErrorInvalidValue;
   }
   if (num_tokens > 0x7fffffffLL / topk) return hipErrorInvalidValue;
+  if (expert_offsets_out == nullptr || !aligned(expert_offsets_out, 8) ||
+      !aligned(topk_ids, 4) || !aligned(sorted_out, 4) ||
+      !valid_workspace(workspace, workspace_bytes)) {
+    return hipErrorInvalidValue;
+  }
   const int64_t num_assignments = num_tokens * topk;
   if (num_assignments == 0) {
     // No ids: still publish zero offsets.
-    if (expert_offsets_out != nullptr) {
-      const size_t bytes = static_cast<size_t>(num_experts + 1) * sizeof(int64_t);
-      return hipMemsetAsync(expert_offsets_out, 0, bytes, stream);
-    }
-    return hipSuccess;
+    const size_t bytes = static_cast<size_t>(num_experts + 1) * sizeof(int64_t);
+    return hipMemsetAsync(expert_offsets_out, 0, bytes, stream);
   }
   if (topk_ids == nullptr || sorted_out == nullptr || expert_offsets_out == nullptr) {
     return hipErrorInvalidValue;

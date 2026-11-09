@@ -39,10 +39,52 @@ def abi(lib):
         ("nf12_hip_moe_grouped_operands", C.c_int, [p, i, p, i, p, i, i, i, p, i, p, p]),
         ("nf12_moe_silu_mul", C.c_int, [p, i, i, i, p, i, p]),
         ("nf12_moe_combine", C.c_int, [p, i, i, i, i, p, i, p]),
+        ("nf12_hip_moe_align_workspace_bytes", sz, [i, i]),
+        ("nf12_hip_moe_align", C.c_int, [p, i, i, i, p, p, p, sz, p]),
     ]:
         fn = getattr(lib, name)
         fn.restype, fn.argtypes = restype, args
     return lib
+
+
+@pytest.mark.parametrize("bad", [
+    "empty_offsets", "ids_alignment", "sorted_alignment", "offsets_alignment",
+    "workspace_alignment", "workspace_null",
+])
+def test_native_moe_align_rejects_invalid_buffers(abi, bad):
+    ids = torch.tensor([1], device="cuda", dtype=torch.int32)
+    sorted_out = torch.full((1,), -7, device="cuda", dtype=torch.int32)
+    offsets = torch.full((3,), -7, device="cuda", dtype=torch.int64)
+    needed = abi.nf12_hip_moe_align_workspace_bytes(1, 2)
+    workspace = torch.empty(needed + 16, device="cuda", dtype=torch.uint8)
+    id_ptr, sorted_ptr = ids.data_ptr(), sorted_out.data_ptr()
+    offsets_ptr, workspace_ptr = offsets.data_ptr(), workspace.data_ptr()
+    tokens = 1
+    if bad == "empty_offsets":
+        tokens, id_ptr, sorted_ptr, offsets_ptr = 0, None, None, None
+        workspace_ptr, needed = None, 0
+    elif bad == "ids_alignment":
+        id_ptr += 2
+    elif bad == "sorted_alignment":
+        sorted_ptr += 2
+    elif bad == "offsets_alignment":
+        offsets_ptr += 4
+    elif bad == "workspace_alignment":
+        workspace_ptr += 2
+    else:
+        workspace_ptr = None
+    assert abi.nf12_hip_moe_align(id_ptr, tokens, 1, 2, sorted_ptr, offsets_ptr,
+                                  workspace_ptr, needed, _stream()) == 1
+    torch.cuda.synchronize()
+    assert bool((sorted_out == -7).all())
+    assert bool((offsets == -7).all())
+
+
+def test_native_moe_align_empty_input_writes_zero_offsets(abi):
+    offsets = torch.full((3,), -7, device="cuda", dtype=torch.int64)
+    assert abi.nf12_hip_moe_align(None, 0, 1, 2, None, offsets.data_ptr(), None, 0, _stream()) == 0
+    torch.cuda.synchronize()
+    assert bool((offsets == 0).all())
 
 
 @pytest.mark.parametrize("twin", [False, True])
