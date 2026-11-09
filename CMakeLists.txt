@@ -138,6 +138,7 @@ file(GLOB_RECURSE NF12_KERNEL_SOURCES CONFIGURE_DEPENDS
 
 add_library(nf12 SHARED
   csrc/api.cu
+  csrc/status.cpp
   csrc/device_info.cu
   ${NF12_KERNEL_SOURCES})
 target_include_directories(nf12

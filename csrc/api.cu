@@ -181,22 +181,6 @@ const DeviceInfo* query_device(int device) {
 
 extern "C" {
 
-const char* nf12_status_string(nf12_status_t status) {
-  switch (status) {
-    case NF12_OK:
-      return "NF12_OK";
-    case NF12_ERROR_INVALID_ARGUMENT:
-      return "NF12_ERROR_INVALID_ARGUMENT: shape, alignment or pointer violates SPEC.md";
-    case NF12_ERROR_UNSUPPORTED:
-      return "NF12_ERROR_UNSUPPORTED: device architecture or configuration not supported";
-    case NF12_ERROR_INSUFFICIENT_WORKSPACE:
-      return "NF12_ERROR_INSUFFICIENT_WORKSPACE";
-    case NF12_ERROR_CUDA:
-      return "NF12_ERROR_CUDA: see nf12_last_cuda_error()";
-  }
-  return "NF12: unknown status";
-}
-
 cudaError_t nf12_last_cuda_error(void) { return g_last_cuda_error; }
 
 size_t nf12_packed_bytes(int64_t n, int64_t k) {

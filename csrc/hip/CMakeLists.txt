@@ -23,6 +23,7 @@ endif()
 set(NF12_HIP_ARCHS "gfx1200;gfx1201" CACHE STRING "AMD GPU targets to build for")
 
 add_library(nf12_hip SHARED
+  ../status.cpp
   decode.hip
   encode.hip
   wmma.hip
@@ -44,7 +45,7 @@ target_compile_definitions(nf12_hip PUBLIC NF12_HIP)
 # platform macro; use the runtime package rather than infer its location from
 # the compiler, which may live under either bin/ or lib/llvm/bin/.
 find_package(hip CONFIG REQUIRED HINTS "${CMAKE_HIP_COMPILER_ROCM_ROOT}")
-target_link_libraries(nf12_hip INTERFACE hip::host)
+target_link_libraries(nf12_hip PUBLIC hip::host)
 # Land next to libnf12.so so a single directory holds either backend.
 set_target_properties(nf12_hip PROPERTIES
   HIP_ARCHITECTURES "${NF12_HIP_ARCHS}"
