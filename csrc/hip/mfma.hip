@@ -78,37 +78,52 @@ __device__ __forceinline__ MfmaD mfma(MfmaA a, MfmaA b, MfmaD c) {
   return c;
 }
 
-// Decode super-atom `sa` (16 weight rows x 64 K) into a rowwise shared tile.
-// Called with the low 32 lanes of a wave; the same codec helpers the RDNA4
-// decode kernel uses, so the decoded BF16 matches nf12_hip_decode bit for bit.
-template <WeightSource S>
-__device__ __forceinline__ void decode_tile_from(const uint4 (&planes)[SourceTraits<S>::kLoads],
-                                                 const uint4* __restrict__ escapes, uint32_t base_x4,
-                                                 int dlane, __hip_bfloat16* __restrict__ dst) {
-  AtomRegs r;
-  source_planes_to_atoms<S>(planes, base_x4, escapes, r);
-  RowTile x;
-  atoms_to_tile(r, x);
-#pragma unroll
-  for (int h = 0; h < 2; ++h) {
-#pragma unroll
-    for (int p = 0; p < 2; ++p) quad_transpose(x[h][p], dlane);
-  }
-  // Local tile origin: row (dlane>>2), chunk group (dlane&3). store_row_tile
-  // adds (lane>>2)*ld + 8*(lane&3), which is exactly a 16x64 row-major tile.
-  store_row_tile(dst, int64_t(dlane >> 2) * kTileRowStride + 8 * (dlane & 3),
-                 kTileRowStride, x);
+// Cross-lane copy of one 16-byte chunk from lane `src`. A low lane asking for
+// its own chunk gets it back unchanged, so the same instruction serves both
+// halves of the wave.
+__device__ __forceinline__ uint4 shfl4(uint4 v, int src) {
+  v.x = __shfl(v.x, src);
+  v.y = __shfl(v.y, src);
+  v.z = __shfl(v.z, src);
+  v.w = __shfl(v.w, src);
+  return v;
 }
 
-// Load + decode in one call. The dense tile kernel instead prefetches the planes
-// a step ahead so the packed-weight latency overlaps the matrix-core work.
+// Decode one half of a super-atom's 16x64 tile.
+//
+// A wave's two 32-lane halves each own half of the output columns: `half` 0
+// takes atom groups 0 and 1 (columns 0-31), `half` 1 takes groups 2 and 3
+// (columns 32-63). atoms_to_tile pairs groups (2p, 2p+1) into x[.][p], and
+// store_row_tile writes x[.][p] at column 32p, so the split is exactly the
+// tile's two 32-column halves. Both halves therefore decode at once and the
+// codec arithmetic per K block halves; the group operands are selected per lane
+// because a divergent branch would serialise the halves. quad_transpose only
+// crosses lane bits 0-1, so it stays inside each half.
 template <WeightSource S>
-__device__ __forceinline__ void decode_tile(const uint4* __restrict__ packed,
+__device__ __forceinline__ void decode_half(const uint4 (&planes)[SourceTraits<S>::kLoads],
                                             const uint4* __restrict__ escapes, uint32_t base_x4,
-                                            int64_t sa, int dlane, __hip_bfloat16* __restrict__ dst) {
-  uint4 planes[SourceTraits<S>::kLoads];
-  load_source_planes<S>(packed, sa, dlane, planes);
-  decode_tile_from<S>(planes, escapes, base_x4, dlane, dst);
+                                            int dlane, int half, __hip_bfloat16* __restrict__ dst) {
+  uint32_t r0[4];
+  uint32_t r1[4];
+  if constexpr (S == WeightSource::kNf12) {
+    // Group 2h is (meta of chunk 2h, lo0, lo1) of planes {0, 1|2}; group 2h+1
+    // is the next slot of the same pair.
+    const uint4 pA = half ? planes[2] : planes[1];
+    decode_group(Group{half ? planes[0].z : planes[0].x, pA.x, pA.y}, base_x4, escapes, r0);
+    decode_group(Group{half ? planes[0].w : planes[0].y, pA.z, pA.w}, base_x4, escapes, r1);
+  } else {
+    const uint4 g0 = half ? planes[2] : planes[0];
+    const uint4 g1 = half ? planes[3] : planes[1];
+    r0[0] = g0.x; r0[1] = g0.y; r0[2] = g0.z; r0[3] = g0.w;
+    r1[0] = g1.x; r1[1] = g1.y; r1[2] = g1.z; r1[3] = g1.w;
+  }
+  uint4 x0 = make_uint4(r0[0], r0[2], r1[0], r1[2]);
+  uint4 x1 = make_uint4(r0[1], r0[3], r1[1], r1[3]);
+  quad_transpose(x0, dlane);
+  quad_transpose(x1, dlane);
+  uint4* p = reinterpret_cast<uint4*>(dst + int64_t(dlane >> 2) * kTileRowStride + 8 * (dlane & 3));
+  p[4 * half] = x0;
+  p[kTileRowStride + 4 * half] = x1;
 }
 
 // One lane's 4-BF16 window of an activation row. row = lane%16 (the M index),
@@ -206,9 +221,11 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
   for (int t = 0; t < kMt; ++t) acc[t] = MfmaD{0.0f, 0.0f, 0.0f, 0.0f};
 
-  // Decode with the wave's low 32 lanes; both halves then meet at the barrier.
+  // Both halves decode, each taking the 32 output columns its atom groups own;
+  // they meet at the barrier.
   const int dlane = lane & 31;
   const bool decode_pass = lane < 32;
+  const int half = lane >> 5;
 
   auto a_frag = [&](int64_t t, int64_t kk) -> MfmaA {
     if constexpr (kRouted) {
@@ -229,7 +246,18 @@ __global__ void __launch_bounds__(kThreads)
 
   for (int64_t kb = 0; kb < k_blocks; ++kb) {
     const int64_t sa = (n0 / kSuperAtomRows) * k_blocks + kb;
-    if (decode_pass) decode_tile<S>(packed, escapes, base_x4, sa, dlane, sh);
+    uint4 planes[SourceTraits<S>::kLoads];
+    if (decode_pass) load_source_planes<S>(packed, sa, dlane, planes);
+    // Hand the high half the low half's planes; see decode_half.
+    if constexpr (S == WeightSource::kNf12) {
+      planes[2] = shfl4(planes[2], dlane);
+      planes[0].z = __shfl(planes[0].z, dlane);
+      planes[0].w = __shfl(planes[0].w, dlane);
+    } else {
+      planes[2] = shfl4(planes[2], dlane);
+      planes[3] = shfl4(planes[3], dlane);
+    }
+    decode_half<S>(planes, escapes, base_x4, dlane, half, sh);
     __syncthreads();
 
     const int64_t kbase = kb * kSuperAtomCols;
@@ -340,6 +368,10 @@ __global__ void __launch_bounds__(kWave * kCols)
   for (int t = 0; t < kMt; ++t)
     a_origin[t] = std::max(int64_t(0), std::min(m0 + int64_t(t) * 16, m_rows - 16));
 
+  // Rows of the staged block that exist in `x`. A full tile always has 16; a
+  // sub-tile launch has `m`, and its padding is zeroed once below.
+  const int64_t rows_here = std::min<int64_t>(kSuperAtomRows, m_rows - a_origin[0]);
+
   const int64_t k_blocks = k / kSuperAtomCols;
   const int64_t per = (k_blocks + gridDim.z - 1) / gridDim.z;
   const int64_t kb_begin = int64_t(blockIdx.z) * per;
@@ -351,11 +383,25 @@ __global__ void __launch_bounds__(kWave * kCols)
 
   const int dlane = lane & 31;
   const bool decode_pass = lane < 32;
+  const int half = lane >> 5;  // which 32-column half of the tile this lane owns
   const int nthreads = kWave * kCols;
   const int b_row = (lane % 16) * kTileRowStride + 4 * quad;
   const int a_col = (lane % 16) * kXStride + 4 * quad;
   __hip_bfloat16* const sh = &tile[wave][0];
   const int64_t sa0 = (n0 / kSuperAtomRows) * k_blocks;
+
+  // Sub-tile launch: zero the rows past `x` once. The per-step copy below only
+  // writes rows that exist, so the hot path is the plain unconditional copy.
+  if (rows_here < kSuperAtomRows) {
+    for (int t = 0; t < kMt; ++t) {
+      __hip_bfloat16* dstb = &xs[t * kSuperAtomRows * kXStride];
+      for (int i = threadIdx.x; i < (kSuperAtomRows - rows_here) * 8; i += nthreads) {
+        const int rr = int(rows_here) + (i >> 3);
+        const int c = (i & 7) * 8;
+        *reinterpret_cast<uint4*>(dstb + rr * kXStride + c) = uint4{0u, 0u, 0u, 0u};
+      }
+    }
+  }
 
   // Prefetch one super-atom's packed planes. The decode is a small amount of
   // arithmetic behind a 1.5 KiB load, so issuing that load a step early keeps
@@ -374,17 +420,28 @@ __global__ void __launch_bounds__(kWave * kCols)
     for (int t = 0; t < kMt; ++t) {
       const __hip_bfloat16* srcb = x + a_origin[t] * ldx + kb_off;
       __hip_bfloat16* dstb = &xs[t * kSuperAtomRows * kXStride];
-      for (int i = threadIdx.x; i < kSuperAtomRows * 8; i += nthreads) {
+      // `rows_here` is the block height for a full tile and `m` for a sub-tile
+      // launch, whose padded rows were zeroed once before this loop.
+      for (int i = threadIdx.x; i < rows_here * 8; i += nthreads) {
         const int rr = i >> 3;
         const int c = (i & 7) * 8;
         *reinterpret_cast<uint4*>(dstb + rr * kXStride + c) =
             *reinterpret_cast<const uint4*>(srcb + rr * ldx + c);
       }
     }
-    if (decode_pass) {
-      decode_tile_from<S>(planes, escapes, base_x4, dlane, sh);
-      if (kb + 1 < kb_end) load_source_planes<S>(packed, sa0 + kb + 1, dlane, planes);
+    // Both halves decode this super-atom, so the high half needs the low half's
+    // planes. Only the slots it reads are moved, and in place: for a low lane
+    // `__shfl` returns its own value.
+    if constexpr (S == WeightSource::kNf12) {
+      planes[2] = shfl4(planes[2], dlane);
+      planes[0].z = __shfl(planes[0].z, dlane);
+      planes[0].w = __shfl(planes[0].w, dlane);
+    } else {
+      planes[2] = shfl4(planes[2], dlane);
+      planes[3] = shfl4(planes[3], dlane);
     }
+    decode_half<S>(planes, escapes, base_x4, dlane, half, sh);
+    if (decode_pass && kb + 1 < kb_end) load_source_planes<S>(packed, sa0 + kb + 1, dlane, planes);
     __syncthreads();
 
     // Every fragment for this K block is loaded before the first MFMA: left
@@ -493,9 +550,8 @@ hipError_t linear_launch(const uint8_t* packed, const uint4* escapes, uint32_t e
   if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0) {
     return hipErrorInvalidValue;
   }
-  // A 16-row A tile cannot be formed below 16 tokens without reading past `x`;
-  // the caller routes that band to the fused GEMV instead.
-  if (m < 16) return hipErrorInvalidValue;
+  // Below one 16-row tile the staged activation block is zero-filled past `m`.
+  if (m <= 0) return hipErrorInvalidValue;
   const int64_t n_tiles = n / kSuperAtomRows;
   const int tiles = static_cast<int>((m + 15) / 16);
   if (n_tiles == 0 || tiles == 0) return hipSuccess;
@@ -593,6 +649,149 @@ hipError_t moe_launch(const uint8_t* packed, const uint4* escapes, const int64_t
   return hipGetLastError();
 }
 
+// ---------------------------------------------------------------------------
+// Small-M fused GEMV.
+//
+// Same algorithm, ownership map and reduction order as the RDNA4 fused kernel
+// in decode.hip: one 16-row column block per CTA, K split across the CTA's
+// 32-lane groups, the decoded super-atom kept in registers and reduced against
+// the activation row in place, bias folded into the FP32 sum before the single
+// BF16 rounding. It lives here, not there, so that kernel's device code stays
+// byte-identical to the RDNA4 branch.
+//
+// The shape is the CDNA3 one. Eight groups leave the packed stream exposed on
+// a 304-CU part: the load latency of a step is longer than its decode plus
+// dot, so the CTA runs out of work. Sixteen groups (512 threads, eight wave64s)
+// double the loads in flight, which is the only thing that moves a kernel this
+// small. The warp-partial plane is sized for the tokens actually in flight
+// instead of being padded, because sixteen groups cannot afford the padding.
+constexpr int kSmallWarps = 16;
+
+template <WeightSource S, int kM>
+__global__ void __launch_bounds__(kSmallWarps * kWarpSize)
+    linear_small_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
+                        const uint4* __restrict__ escapes, uint32_t base_x4, int64_t k, int64_t m,
+                        int64_t ldx, int64_t ldy, __hip_bfloat16* __restrict__ out,
+                        const __hip_bfloat16* __restrict__ bias) {
+  __shared__ float part[kSmallWarps][kM][kSuperAtomRows];
+
+  const int lane = threadIdx.x % kWarpSize;
+  const int warp = threadIdx.x / kWarpSize;
+  const int g = lane >> 2;
+  const int t = lane & 3;
+
+  const int64_t n0 = int64_t(blockIdx.x) * kSuperAtomRows;
+  const int64_t k_blocks = k / kSuperAtomCols;
+
+  // Contiguous, equal K slices; the last group takes any remainder.
+  const int64_t kb_per = (k_blocks + kSmallWarps - 1) / kSmallWarps;
+  const int64_t kb_begin = int64_t(warp) * kb_per;
+  int64_t kb_end = kb_begin + kb_per;
+  if (kb_end > k_blocks) kb_end = k_blocks;
+
+  for (int64_t idx = threadIdx.x; idx < kSmallWarps * kM * kSuperAtomRows;
+       idx += kSmallWarps * kWarpSize) {
+    (&part[0][0][0])[idx] = 0.0f;
+  }
+  __syncthreads();
+
+  float acc[kM][2];
+#pragma unroll
+  for (int mi = 0; mi < kM; ++mi) {
+    acc[mi][0] = 0.0f;
+    acc[mi][1] = 0.0f;
+  }
+
+  // One super-atom of packed planes in flight: issue the next load before
+  // decoding the current one, so the packed stream is never idle.
+  const int64_t sa_base = (n0 / kSuperAtomRows) * k_blocks;
+  uint4 planes[SourceTraits<S>::kLoads];
+  if (kb_begin < kb_end) load_source_planes<S>(packed, sa_base + kb_begin, lane, planes);
+  for (int64_t kb = kb_begin; kb < kb_end; ++kb) {
+    uint4 cur[SourceTraits<S>::kLoads];
+#pragma unroll
+    for (int i = 0; i < SourceTraits<S>::kLoads; ++i) cur[i] = planes[i];
+    if (kb + 1 < kb_end) load_source_planes<S>(packed, sa_base + kb + 1, lane, planes);
+    AtomRegs regs;
+    source_planes_to_atoms<S>(cur, base_x4, escapes, regs);
+    const __hip_bfloat162* xrow =
+        reinterpret_cast<const __hip_bfloat162*>(x + kb * kSuperAtomCols);
+    for (int mi = 0; mi < kM; ++mi) {
+      // A rounded-up instantiation has more tiles than tokens; clamp so it can
+      // never read past `x`. Those rows are dropped by the epilogue.
+      const int64_t row = mi < m ? mi : m - 1;
+      dot_super_atom(regs, xrow + row * (ldx / 2), t, acc[mi][0], acc[mi][1]);
+    }
+  }
+
+  // Collapse the four t lanes of this quad (fixed xor order 1 then 2), then
+  // publish the two owned rows for every token to shared memory.
+  for (int mi = 0; mi < kM; ++mi) {
+    float hi = acc[mi][0];
+    float lo = acc[mi][1];
+    hi += __shfl_xor(hi, 1);
+    hi += __shfl_xor(hi, 2);
+    lo += __shfl_xor(lo, 1);
+    lo += __shfl_xor(lo, 2);
+    if (t == 0) {
+      part[warp][mi][g] = hi;
+      part[warp][mi][g + kSuperAtomRows / 2] = lo;
+    }
+  }
+  __syncthreads();
+
+  // Sum the group partials in fixed order so the result is deterministic.
+  const int64_t total = m * kSuperAtomRows;
+  for (int64_t idx = threadIdx.x; idx < total; idx += kSmallWarps * kWarpSize) {
+    const int64_t mi = idx / kSuperAtomRows;
+    const int64_t row = idx % kSuperAtomRows;
+    float sum = 0.0f;
+#pragma unroll
+    for (int w = 0; w < kSmallWarps; ++w) sum += part[w][mi][row];
+    if (bias != nullptr) sum += __bfloat162float(bias[n0 + row]);
+    out[mi * ldy + n0 + row] = __float2bfloat16(sum);
+  }
+}
+
+template <WeightSource S>
+hipError_t linear_small_launch(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                               const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                               const void* bias, hipStream_t stream, int64_t ldx, int64_t ldy) {
+  if (m < 1 || m > kSuperAtomRows) return hipErrorInvalidValue;
+  if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0) {
+    return hipErrorInvalidValue;
+  }
+  const int64_t blocks = n / kSuperAtomRows;
+  if (blocks == 0) return hipSuccess;
+  if (blocks > kMaxGridX) return hipErrorInvalidValue;
+
+  // The token count is a template parameter so the accumulators and the
+  // warp-partial plane stay compile-time sized.
+#define NF12_SMALL_LAUNCH(K)                                                                 \
+  linear_small_kernel<S, K><<<static_cast<unsigned>(blocks), kSmallWarps * kWarpSize, 0,     \
+                              stream>>>(                                                     \
+      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),    \
+      escapes, exp_base_x4(exp_base), k, m, ldx, ldy,                                       \
+      reinterpret_cast<__hip_bfloat16*>(out), reinterpret_cast<const __hip_bfloat16*>(bias))
+  // Only the tile counts that register-allocate cleanly are instantiated. Odd
+  // counts from 7 up spill the accumulator array and run two orders of
+  // magnitude slower, so a short token count rounds up to the next one that
+  // works and the epilogue drops the extra rows.
+  switch (m) {
+    case 1: NF12_SMALL_LAUNCH(1); break;
+    case 2: NF12_SMALL_LAUNCH(2); break;
+    case 3: NF12_SMALL_LAUNCH(3); break;
+    case 4: NF12_SMALL_LAUNCH(4); break;
+    case 5: NF12_SMALL_LAUNCH(5); break;
+    case 6: NF12_SMALL_LAUNCH(6); break;
+    case 7:
+    case 8: NF12_SMALL_LAUNCH(8); break;
+    default: NF12_SMALL_LAUNCH(16); break;
+  }
+#undef NF12_SMALL_LAUNCH
+  return hipGetLastError();
+}
+
 }  // namespace
 
 hipError_t linear_mfma_strided(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
@@ -608,10 +807,25 @@ hipError_t linear_mfma_strided(const uint8_t* packed, const uint4* escapes, uint
                                             ldy, workspace, workspace_bytes, stream);
 }
 
+// Fused m < 16 route for a CDNA3 part. No workspace: the K split and its
+// reduction live inside the CTA.
+hipError_t linear_small_strided(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                               const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                               const void* bias, int64_t ldx, int64_t ldy, bool bf16t,
+                               hipStream_t stream) {
+  if (exp_base > uint32_t(kMaxExpBase) || ldx < k || ldy < n) return hipErrorInvalidValue;
+  if (bf16t) {
+    return linear_small_launch<WeightSource::kBf16t>(packed, nullptr, 0, x, out, n, k, m, bias,
+                                                     stream, ldx, ldy);
+  }
+  return linear_small_launch<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m, bias,
+                                                  stream, ldx, ldy);
+}
+
 // K splits the dense route will use for this shape. The workspace query and the
 // launcher both read it, so they cannot disagree about the partial plane.
 int mfma_dense_splits(int64_t m, int64_t n, int64_t k) {
-  if (m < 16 || n <= 0 || k <= 0 || n % kSuperAtomRows != 0) return 1;
+  if (m <= 0 || n <= 0 || k <= 0 || n % kSuperAtomRows != 0) return 1;
   return mfma_plan(m, n, k).kSplits;
 }
 

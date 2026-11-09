@@ -160,12 +160,14 @@ Route selection is a **device trait**, not an ISA check (`backend.hip`,
 | `xccs` | 1 | 8 |
 | `l2_bytes` | 64 MiB | 4 MiB |
 
-* **`m <= 15`** — the fused decode+GEMM GEMV kernel (`decode.hip`), on every
-  device.
+* **`m <= 15`** — on RDNA4 and on a device with no matrix core, the fused
+  decode+GEMM GEMV kernel (`decode.hip`).
 * **RDNA4 `kWmma`** — native `v_wmma` matrix cores for `16 <= m <= 256`; larger
   `m` falls back to decode-then-rocBLAS in the torch layer.
-* **CDNA3 `kMfma`** — the fused `v_mfma` kernel (`mfma.hip`) serves the
-  small-M band `16 <= m <= 64`. That band is fixed by the shared API contract
+* **CDNA3 `kMfma`** — the fused `v_mfma` kernel (`mfma.hip`) serves
+  `6 <= m <= 128` (below 16 with a zero-padded activation block); `m <= 5` runs
+  the same file's `linear_small_kernel`, the fused GEMV with sixteen 32-lane
+  groups. That band is fixed by the shared API contract
   (SPEC §6.5: `nf12_linear_decode_gemm_rows(m, n, k) == 0` for `m ∈ {1,16,64}`
   on any device), not by a speed comparison — on this part even a full decode
   plus rocBLAS is quicker at those sizes, but the answer must not depend on
@@ -378,7 +380,35 @@ latency-bound rather than bandwidth-bound. `mfma_tile_kernel` fixes both:
 * the FP32 partial planes of the K splits are summed in ascending split order
   by `mfma_reduce_kernel`, so the result stays deterministic;
 * the next super-atom's packed planes are prefetched a step early, keeping the
-  packed-weight latency off the critical path.
+  packed-weight latency off the critical path;
+* the wave's **two 32-lane halves decode one super-atom together**, each taking
+  the pair of atom groups that owns its 32 output columns (`decode_half`), so
+  the codec arithmetic per K block is halved. The high half receives the low
+  half's planes with six `__shfl` moves; a divergent `if` would serialise the
+  halves instead. `quad_transpose` only crosses lane bits 0-1, so it stays
+  inside a half.
+
+The sub-16 band is split by which kernel is cheaper, not by a contract:
+
+* `1 <= m <= 5` runs `linear_small_kernel`, the same fused GEMV algorithm and
+  reduction order as the RDNA4 kernel in `decode.hip` (which stays untouched),
+  but shaped for this part. Eight 32-lane groups leave the packed stream exposed
+  on 304 CUs — the decode plus dot of a step is shorter than the load latency —
+  so the CDNA3 kernel runs **sixteen** groups (512 threads) and sizes its
+  warp-partial plane for the tokens in flight instead of padding it. Worth 21%
+  at `m = 1` (13.2 → 10.7 µs).
+* `6 <= m <= 15` runs the fused MFMA tile instead, with the staged activation
+  block **zero-filled** past `m` (once per CTA, so the per-step copy stays
+  unconditional). The matrix core does 16 rows' work whatever `m` is, which is
+  cheap, and it beats the GEMV from about six tokens up, where the GEMV's scalar
+  dot chain rather than the packed stream is the limit: `m = 15` is 21 µs
+  instead of 57 µs, `m = 9` 21 µs instead of 56 µs.
+
+`linear_small_kernel` only instantiates the tile counts that register-allocate
+cleanly: `kM` from 7 up (except 8) spills the accumulator array and runs 20–40×
+slower, so a token count in that range rounds up to the next usable
+instantiation (8 or 16) and the epilogue drops the extra rows. `m = 15` was
+2.5 ms before that rounding.
 
 The packed weight is still never materialised. `kSplits` follows the tile
 height: a short tile has fewer MFMA per barrier and needs more CTAs to hide
@@ -388,26 +418,30 @@ latency, a tall one already has the work and pays for a larger partial plane.
 
 | m | route | nf12 µs | bf16t twin µs | bf16 torch µs |
 | ---: | --- | ---: | ---: | ---: |
-| 1 | fused GEMV | 13.2 | 11.4 | 14.2 |
-| 16 | fused MFMA | 22.4 | 22.0 | 14.9 |
-| 32 | fused MFMA | 25.2 | 25.1 | 15.8 |
-| 64 | fused MFMA | 27.9 | 27.1 | 17.7 |
-| 128 | fused MFMA | 38.1 | 38.1 | 21.9 |
-| 256 | decode + rocBLAS | 44.9 | — | 28.0 |
+| 1 | fused GEMV (16 groups) | 10.8 | 11.4 | 14.3 |
+| 16 | fused MFMA | 21.2 | 21.6 | 15.0 |
+| 32 | fused MFMA | 23.9 | 25.3 | 15.8 |
+| 64 | fused MFMA | 26.2 | 28.0 | 17.8 |
+| 128 | fused MFMA | 36.7 | 38.8 | 22.0 |
+| 256 | decode + rocBLAS | 47.2 | 69.4 | 32.6 |
 
-That is 7.7× faster than the first CDNA3 cut at `m = 64` (215.5 µs) and 4.7× at
+That is 8.2× faster than the first CDNA3 cut at `m = 64` (215.5 µs) and 4.9× at
 `m = 128` (178.1 µs). The nf12/bf16t column is the honest measure of what the
-format buys, because both run the same kernel: nf12 is at parity (0.97–1.00×)
-and the remaining gap is the decode arithmetic, not the bytes. Against
-`torch.matmul` on the dense BF16 weight nf12 wins only at `m = 1` (1.08×); above
-that the fused decode cannot match rocBLAS, which reads the weight once and has
-almost no activation traffic.
+format buys, because both run the same kernel: nf12 now wins every shape in the
+PR #3 grid, **1.02–1.14×**, because it reads a quarter fewer weight bytes and
+the decode is amortised over the whole CTA. Against `torch.matmul` on the dense
+BF16 weight nf12 wins only at `m = 1` (1.32×); above that the fused decode
+cannot match rocBLAS, which reads the weight once and has almost no activation
+traffic.
 
-**MoE (MI300X), `E=8 N=K=4096 topk=2`:** `moe_linear` is 142 / 207 / 469 µs at
-`t = 64 / 256 / 1024` on the fused routed MFMA kernel. At `t = 1024` the
-decode + `_grouped_mm` route measured 199 µs, i.e. 2.4× faster, but is rejected
-because it cannot be graph-captured on this ROCm build; the fused kernel is the
-graph-safe native route.
+**MoE (MI300X, `mixtral-8x7b` E=8 topk=2, uniform routing):** `moe_linear` is
+1087 / 3241 / 11655 µs for `w13` and 585 / 1503 / 4997 µs for `w2` at
+`t = 64 / 256 / 1024` on the fused routed MFMA kernel, **1.01–1.08× faster than
+the bf16t twin**, which runs the same kernel — the routed kernel decodes with
+both wave halves as well. The CUDA build can hand a gathered launch to decode +
+`aten::_grouped_mm`, which is quicker, but it is rejected here because it cannot
+be graph-captured on this ROCm build; the fused kernel is the graph-safe native
+route.
 
 ## Performance (R9700, `gfx1201`, 32 CUs, wave32)
 
@@ -627,8 +661,8 @@ All verified on `gfx1201` hardware:
   re-read once per 16 assignments of an expert. That wins from 16 to ~1k tokens
   against a dense-BF16 loop, but a multi-tile CTA (or split-K) is the next step
   for large token counts.
-* Only `gfx1200`/`gfx1201` are validated. `gfx1250` builds but takes the
-  non-wmma route.
+* `gfx1200`/`gfx1201` and `gfx942` are validated on hardware. `gfx1250` builds
+  but takes the non-wmma route.
 
 ## Credits
 
