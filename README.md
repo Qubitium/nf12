@@ -65,6 +65,16 @@ native two-kernel fused route instead of the composed one; see
 Validated on **ROCm 10.1.0 with HIP 7.16.26385** on Radeon AI PRO R9700
 (`gfx1201`). See the [validated toolchain and test instructions](tests/hip/README.md).
 
+The package follows the CUDA build's `NF12_BUILD_NATIVE` switch:
+
+| Setting | ROCm wheel contents | Compilation |
+| --- | --- | --- |
+| `ON` (default) | HIP libraries and sources | During the package build |
+| `OFF` | Sources only | JIT on first native use, cached per user |
+
+`NF12_ENABLE_HIP` enables the HIP backend; it does not control when compilation
+happens. With ROCm PyTorch installed, the top-level build enables HIP by default.
+
 Build from source with the ROCm toolkit, a C++ compiler, CMake 3.26+ and Ninja.
 
 ```bash
@@ -76,8 +86,8 @@ cmake --build build/hip --target nf12_torch
 ```
 
 Use `-DNF12_HIP_ARCHS=gfx1200` for a `gfx1200` GPU. To build only the C library,
-set `-DNF12_BUILD_TORCH=OFF` and build `--target nf12_hip`. On a ROCm host,
-`nf12._jit` automatically builds both libraries from a source checkout.
+set `-DNF12_BUILD_TORCH=OFF` and build `--target nf12_hip`. When an installed
+wheel has no libraries, `nf12._jit` builds both from its packaged sources.
 
 Fused linear kernels support batches of 1–256 tokens. For larger batches,
 the torch API decodes bounded slices and runs BF16 GEMMs; the raw C API

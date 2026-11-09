@@ -119,10 +119,10 @@ with **zero output/guard writes**. A 16-row slice starting at N now returns
 `hipErrorInvalidValue` instead of reading the trailing encoded matrix. SiLU
 with output stride zero now returns that error instead of overwriting output.
 
-The source-only wheel retains all 78 required source files byte-for-byte,
-including `csrc/validation.h`, and contains no compiled libraries. Before the
-bounds fix, installed-wheel JIT probes on both backends passed all 65536 BF16
-bit patterns and 78080 exact twin elements each. Packed bytes (98304), escapes
+The `NF12_BUILD_NATIVE=OFF` source-only wheel retains all 78 required source
+files byte-for-byte, including `csrc/validation.h`, and contains no compiled
+libraries. Before the bounds fix, installed-wheel JIT probes on both backends
+passed all 65536 BF16 bit patterns and 78080 exact twin elements each. Packed bytes (98304), escapes
 (131072 bytes), and exponent base matched across CUDA and HIP.
 
 R9700 valid-call A/B against `c6c4da0`: same-process interleaved calls, 20 warmups,

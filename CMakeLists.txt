@@ -199,10 +199,22 @@ endif()
 
 endif()  # NF12_HAVE_CUDA
 
-# RDNA4 (gfx1200/gfx1201) HIP kernels. Off by default and additive: enabling it
-# does not change any CUDA target. The subtree also builds standalone without a
-# CUDA toolkit via `cmake -S csrc/hip -B build-hip`.
+# RDNA4 (gfx1200/gfx1201) HIP kernels. The subtree also builds standalone
+# without a CUDA toolkit via `cmake -S csrc/hip -B build-hip`.
 if(NF12_ENABLE_HIP)
+  # CMake looks for hipconfig on PATH when finding HIP. Some ROCm installations
+  # expose neither hipconfig nor amdclang++ there, including package builds,
+  # so locate the compiler directly as the runtime JIT does.
+  if(NOT CMAKE_HIP_COMPILER AND NOT "$ENV{CMAKE_HIP_COMPILER}" STREQUAL "")
+    set(CMAKE_HIP_COMPILER "$ENV{CMAKE_HIP_COMPILER}" CACHE FILEPATH "HIP compiler")
+  endif()
+  if(NOT CMAKE_HIP_COMPILER AND "$ENV{HIPCXX}" STREQUAL "")
+    find_program(_nf12_hip_compiler NAMES amdclang++
+      HINTS "$ENV{ROCM_PATH}/bin" "$ENV{HIP_PATH}/bin" /opt/rocm/bin)
+    if(_nf12_hip_compiler)
+      set(CMAKE_HIP_COMPILER "${_nf12_hip_compiler}" CACHE FILEPATH "HIP compiler")
+    endif()
+  endif()
   enable_language(HIP)
   add_subdirectory(csrc/hip)
 endif()

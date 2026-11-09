@@ -48,11 +48,12 @@ cmake -S . -B build -G Ninja -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=OFF \
 cmake --build build --target nf12_hip -j
 ```
 
-On ROCm, `nf12._jit` detects visible `gfx` targets and builds both
-`libnf12_hip.so` and `libnf12_torch.so` into the per-user cache.
-`nf12.library_path()` resolves the HIP library. Note for CMake >= 4.2:
-`CMAKE_HIP_COMPILER` must point at `amdclang++` directly; the `hipcc` wrapper
-is rejected.
+The default `NF12_BUILD_NATIVE=ON` compiles and installs both libraries in the
+wheel at package-build time. With `NF12_BUILD_NATIVE=OFF`, the wheel contains
+sources only; `nf12._jit` detects visible `gfx` targets and compiles both
+libraries into a per-user cache on first use. `nf12.library_path()` prefers a
+packaged library and otherwise resolves the JIT build. When overriding the HIP
+compiler for CMake >= 4.2, use `amdclang++` directly; `hipcc` is rejected.
 
 ## Interface
 
