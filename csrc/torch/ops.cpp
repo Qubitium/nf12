@@ -544,6 +544,10 @@ Tensor fused_moe(const Tensor& x, const Tensor& packed13, const std::optional<Te
                  const Tensor& packed2, const std::optional<Tensor>& escapes2,
                  const std::optional<Tensor>& escape_offsets2, const std::optional<Tensor>& exp_base2,
                  const Tensor& topk_weights, const Tensor& topk_ids, bool zero_fill) {
+  // The argument remains in the op schema for existing callers. The combine
+  // always reads every top-k slot, including assignments dropped by moe_align,
+  // so its input must be initialized even when the caller passes false.
+  (void)zero_fill;
   const int32_t device = packed13.get_device_index();
   const torch::stable::accelerator::DeviceGuard guard(device);
   const auto w13 = fused_weight_view(packed13, escapes13, escape_offsets13, exp_base13, device);
@@ -595,9 +599,9 @@ Tensor fused_moe(const Tensor& x, const Tensor& packed13, const std::optional<Te
   h = moe_silu_mul(h);
   const Tensor row_scale = torch::stable::view(scales, {t * topk});
   const Tensor y = w2.bf16t
-                       ? moe_linear_bf16t(h, packed2, offsets, std::nullopt, 1, sorted, row_scale, zero_fill)
+                       ? moe_linear_bf16t(h, packed2, offsets, std::nullopt, 1, sorted, row_scale, true)
                        : moe_linear(h, packed2, *escapes2, *escape_offsets2, *exp_base2, offsets, std::nullopt, 1,
-                                    sorted, row_scale, zero_fill);
+                                    sorted, row_scale, true);
   return moe_combine(y, topk);
 }
 

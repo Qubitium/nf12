@@ -887,13 +887,14 @@ def test_routed_gather_tail_is_not_read(moe_pack, e, zero_fill):
 
 @pytest.mark.parametrize("ids", [[0, -1], [-1, -1]], ids=["one-active", "all-dropped"])
 @pytest.mark.parametrize("bad_scale", [float("nan"), float("inf")], ids=["nan", "inf"])
-def test_fused_moe_dropped_assignment_ignores_router_scale(moe_pack, ids, bad_scale):
+@pytest.mark.parametrize("tokens", [1, 2])
+def test_fused_moe_dropped_assignment_ignores_router_scale(moe_pack, ids, bad_scale, tokens):
     e, k, inter = 2, 256, 128
     w13 = experts(e, 2 * inter, k, seed=72, scale=.02, spread=0)
     w2 = experts(e, k, inter, seed=73, scale=.02, spread=0)
-    x = activations(1, k, seed=74) * .05
-    ids = torch.tensor([ids], device=DEV, dtype=torch.int32)
-    weights = torch.tensor([[1., bad_scale]], device=DEV, dtype=torch.float32)
+    x = activations(tokens, k, seed=74) * .05
+    ids = torch.tensor([ids] * tokens, device=DEV, dtype=torch.int32)
+    weights = torch.tensor([[1., bad_scale]] * tokens, device=DEV, dtype=torch.float32)
     out = nf12.fused_moe(x, moe_pack(w13), moe_pack(w2), weights, ids)
     assert bool(out.isfinite().all())
     ref = reference.fused_moe(x, w13, w2, weights, ids)
