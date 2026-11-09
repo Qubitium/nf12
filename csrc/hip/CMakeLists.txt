@@ -33,6 +33,9 @@ add_library(nf12_hip SHARED
   embedding.hip
   pack_bf16t.hip
   backend.hip)
+set_target_properties(nf12_hip PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON
+  HIP_STANDARD 17 HIP_STANDARD_REQUIRED ON)
 target_include_directories(nf12_hip
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include
   # ``torch/fused_decode.h`` is a plain POD header (no torch includes), shared
@@ -88,6 +91,7 @@ if(NF12_BUILD_TORCH AND NF12_TORCH_BACKEND STREQUAL "hip")
   find_library(NF12_TORCH_HIP_LIB torch_hip PATHS "${NF12_TORCH_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
   add_library(nf12_torch SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/../torch/ops.cpp)
+  set_target_properties(nf12_torch PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
   target_include_directories(nf12_torch SYSTEM PRIVATE "${NF12_TORCH_DIR}/include")
   target_include_directories(nf12_torch PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
   # USE_ROCM exposes the CUDA-named stream shim in torch's stable ABI header.
