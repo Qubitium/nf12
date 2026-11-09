@@ -88,6 +88,8 @@ def lib():
     lib.nf12_hip_wmma_max_m.argtypes = []
     lib.nf12_hip_wmma_supported.restype = _INT
     lib.nf12_hip_wmma_supported.argtypes = [_I64]
+    lib.nf12_hip_wmma_supported_device.restype = _INT
+    lib.nf12_hip_wmma_supported_device.argtypes = [_I64, _INT]
     lib.nf12_hip_linear_wmma_workspace_bytes.restype = _SIZE
     lib.nf12_hip_linear_wmma_workspace_bytes.argtypes = [_I64, _I64, _I64]
     lib.nf12_hip_linear_wmma.restype = _INT
@@ -216,6 +218,20 @@ def test_route_bounds(lib):
     assert lib.nf12_hip_wmma_max_m() >= 64
     assert lib.nf12_hip_linear_fused_small_m_supported(1) == 1
     assert lib.nf12_hip_linear_fused_small_m_supported(16) == 1
+
+
+def test_wmma_supported_device_matches_the_current_device(lib):
+    """The op layer routes on an explicit device without switching it.
+
+    `nf12_linear_decode_gemm_rows` calls this for the weight's device, so it
+    must answer for that ordinal and must reject an ordinal that does not
+    exist instead of reading out of bounds.
+    """
+    current = torch.cuda.current_device()
+    for m in (16, 64, 256):
+        assert lib.nf12_hip_wmma_supported_device(m, current) == lib.nf12_hip_wmma_supported(m)
+    assert lib.nf12_hip_wmma_supported_device(16, -1) == 0
+    assert lib.nf12_hip_wmma_supported_device(16, 4096) == 0
 
 
 @pytest.mark.parametrize("n,k", [(16, 64), (256, 256), (1024, 4096)])
