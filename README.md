@@ -74,6 +74,16 @@ The package follows the CUDA build's `NF12_BUILD_NATIVE` switch:
 
 `NF12_ENABLE_HIP` enables the HIP backend; it does not control when compilation
 happens. With ROCm PyTorch installed, the top-level build enables HIP by default.
+For a native ROCm wheel, build in the environment containing the ROCm PyTorch
+wheel and the build tools:
+
+```bash
+python -m pip install 'scikit-build-core>=0.10' ninja
+python -m pip wheel --no-build-isolation --no-deps .
+```
+
+An isolated build resolves its own PyTorch wheel and may select CUDA or CPU
+instead. The torch extension must be built against the ROCm wheel that loads it.
 
 Build from source with the ROCm toolkit, a C++ compiler, CMake 3.26+ and Ninja.
 
