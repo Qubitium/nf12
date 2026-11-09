@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: 2026 AlpinDale and the nf12 contributors
 # SPDX-License-Identifier: Apache-2.0
 """Encoding scheduling boundaries, raw BF16 preservation and stream ownership."""
-from concurrent.futures import ThreadPoolExecutor
 import ctypes as C
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import nf12
-from nf12 import reference
 import pytest
 import torch
+from nf12 import reference
+
 
 def _arch():
     if not torch.cuda.is_available() or torch.version.hip is None:

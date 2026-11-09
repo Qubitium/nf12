@@ -21,22 +21,22 @@ import importlib.metadata
 import io
 import json
 import os
-from pathlib import Path
 import statistics
 import subprocess
 import sys
 import tarfile
 import time
 import types
+from functools import partial
+from pathlib import Path
 
 import torch
-
 from common import MODEL_SHAPES, SHAPES, make_weight, shape_by_key
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'python'))
-import nf12
-from nf12 import reference
+nf12 = importlib.import_module('nf12')
+reference = importlib.import_module('nf12.reference')
 
 
 def run(args):
@@ -83,8 +83,8 @@ def public_function(name, namespace):
 
 def stats(values):
     v = sorted(values)
-    return dict(median_us=statistics.median(v), p10_us=v[len(v)//10],
-                p90_us=v[min(len(v)-1, len(v)*9//10)], samples_us=values)
+    return {'median_us': statistics.median(v), 'p10_us': v[len(v)//10],
+                'p90_us': v[min(len(v)-1, len(v)*9//10)], 'samples_us': values}
 
 
 def paired(functions, warmup, repeats, gpu=False, launches=4):
@@ -124,7 +124,7 @@ def paired(functions, warmup, repeats, gpu=False, launches=4):
                 del result
             samples[j].append(elapsed)
     a, b = map(stats, samples)
-    return dict(baseline=a, current=b, speedup=a['median_us']/b['median_us'])
+    return {'baseline': a, 'current': b, 'speedup': a['median_us']/b['median_us']}
 
 
 class Native:
@@ -224,18 +224,18 @@ def main():
     natives = [Native(root / 'baseline', True), Native(root / 'current')]
     packages = {d.metadata['Name']: d.version for d in importlib.metadata.distributions()
                 if d.metadata['Name'].lower().startswith('rocm')}
-    result = dict(metadata=dict(baseline_ref=args.baseline_ref,
-        current_head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
-        diff=subprocess.check_output(['git', 'diff', '--', 'csrc/hip/encode.hip'], cwd=ROOT, text=True),
-        torch=torch.__version__, hip=torch.version.hip, rocm_packages=packages,
-        hipconfig=subprocess.check_output([args.rocm/'bin/hipconfig', '--version'], text=True).strip(),
-        gpu=str(prop), visible_devices=os.environ.get('HIP_VISIBLE_DEVICES'), gil=sys._is_gil_enabled(),
-        omp=os.environ.get('OMP_NUM_THREADS'), mkl=os.environ.get('MKL_NUM_THREADS'),
-        warmup=args.warmup, repeats=args.repeats, graph_launches=4,
-        weights='synthetic, no checkpoint download',
-        wall='current-stream sync before and after; includes allocation, Python, host validation and D2H waits',
-        gpu_timing='HIP events around graph replay / 4; preallocated, known base/capacity; no D2H or host selection',
-        cache='warm repeated input, no explicit cache flush; largest inputs exceed cache'), cases=[])
+    result = {'metadata': {'baseline_ref': args.baseline_ref,
+        'current_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+        'diff': subprocess.check_output(['git', 'diff', '--', 'csrc/hip/encode.hip'], cwd=ROOT, text=True),
+        'torch': torch.__version__, 'hip': torch.version.hip, 'rocm_packages': packages,
+        'hipconfig': subprocess.check_output([args.rocm/'bin/hipconfig', '--version'], text=True).strip(),
+        'gpu': str(prop), 'visible_devices': os.environ.get('HIP_VISIBLE_DEVICES'), 'gil': sys._is_gil_enabled(),
+        'omp': os.environ.get('OMP_NUM_THREADS'), 'mkl': os.environ.get('MKL_NUM_THREADS'),
+        'warmup': args.warmup, 'repeats': args.repeats, 'graph_launches': 4,
+        'weights': 'synthetic, no checkpoint download',
+        'wall': 'current-stream sync before and after; includes allocation, Python, host validation and D2H waits',
+        'gpu_timing': 'HIP events around graph replay / 4; preallocated, known base/capacity; no D2H or host selection',
+        'cache': 'warm repeated input, no explicit cache flush; largest inputs exceed cache'}, 'cases': []}
     shapes = [shape_by_key(x) for x in args.shapes] if args.shapes else MODEL_SHAPES[:3] + SHAPES
     for shape in shapes:
         patterns = args.patterns if args.shapes or shape in MODEL_SHAPES[:3] + [SHAPES[0], SHAPES[7]] else ['normal']
@@ -250,29 +250,29 @@ def main():
                 rp, re, rb = reference.encode(w.cpu())
                 assert rb == b.exp_base and rp.equal(b.packed.cpu()) and re.equal(b.escapes.cpu())
                 assert reference.pack_bf16t(w.cpu()).equal(nf12.pack_bf16t(w).cpu())
-            bound = [native.bind(w, enc) for native, enc in zip(natives, encoded)]
+            bound = [native.bind(w, enc) for native, enc in zip(natives, encoded, strict=True)]
             metrics = {}
             for op in public:
-                metrics['public_'+op] = paired([lambda f=f: f(w) for f in public[op]], args.warmup, args.repeats)
+                metrics['public_'+op] = paired([partial(f, w) for f in public[op]], args.warmup, args.repeats)
             for name, idx in [('analyze_preallocated_wall', 0), ('encode_preallocated_wall', 1)]:
                 metrics[name] = paired([f[idx] for f in bound], args.warmup, args.repeats)
             for name, stage in [('analyze_gpu', 0), ('encode_gpu', 1), ('full_gpu', 2), ('bf16t_gpu', 3)]:
-                metrics[name] = paired([lambda f=f: f[2](stage) for f in bound], args.warmup, args.repeats, gpu=True)
-            def allocate():
-                return (torch.empty_like(b.packed), torch.empty_like(b.escapes),
-                        torch.empty(natives[1].lib.nf12_encode_workspace_bytes(shape.n, shape.k),
-                                    dtype=torch.uint8, device=w.device))
+                metrics[name] = paired([partial(f[2], stage) for f in bound], args.warmup, args.repeats, gpu=True)
+            def allocate(encoded=b, shape=shape, device=w.device, native=natives[1]):
+                return (torch.empty_like(encoded.packed), torch.empty_like(encoded.escapes),
+                        torch.empty(native.lib.nf12_encode_workspace_bytes(shape.n, shape.k),
+                                    dtype=torch.uint8, device=device))
             metrics['cached_allocations_and_sync_wall'] = paired([allocate]*2, args.warmup, args.repeats)
             metrics['empty_sync_wall'] = paired([lambda: None]*2, args.warmup, args.repeats)
-            case = dict(key=shape.key, n=shape.n, k=shape.k, pattern=pattern,
-                        exp_base=b.exp_base, escapes=b.num_escapes, correctness='byte exact', metrics=metrics)
+            case = {'key': shape.key, 'n': shape.n, 'k': shape.k, 'pattern': pattern,
+                        'exp_base': b.exp_base, 'escapes': b.num_escapes, 'correctness': 'byte exact', 'metrics': metrics}
             result['cases'].append(case)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, indent=2)+'\n')
             m = metrics['public_encode']
             print(shape.key, pattern, 'encode us', *(round(m[v]['median_us'],2) for v in ('baseline','current')),
                   'speedup', round(m['speedup'],3), flush=True)
-            del bound, encoded, a, b, w
+            del allocate, bound, encoded, a, b, w
     print('Saved', args.output, flush=True)
 
 
