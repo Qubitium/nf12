@@ -74,11 +74,40 @@ endif()
 # (linking libnf12.so) and ROCm (linking libnf12_hip.so).
 option(NF12_BUILD_TORCH "Build the torch extension (libnf12_torch.so)" ON)
 
+# Which torch wheel is installed decides which extension to build. A ROCm host
+# can have nvcc on PATH and a CUDA host can ship a ROCm wheel; selecting from
+# compiler discovery alone then links a library the wheel does not provide
+# (torch_cuda on ROCm) and defines `nf12_torch` twice when both subtrees run.
+if(NF12_BUILD_TORCH)
+  find_package(Python COMPONENTS Interpreter REQUIRED)
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c
+      "import torch; print('hip' if torch.version.hip is not None else ('cuda' if torch.version.cuda is not None else 'cpu'))"
+    OUTPUT_VARIABLE NF12_TORCH_BACKEND
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  message(STATUS "nf12: torch backend is ${NF12_TORCH_BACKEND}")
+else()
+  set(NF12_TORCH_BACKEND "none")
+endif()
+
+# The CUDA kernels are built unless torch is the ROCm wheel. The CUDA torch
+# extension is further restricted to a CUDA wheel: a CPU wheel has no
+# torch_cuda, and a ROCm wheel must not enter the CUDA subtree at all.
+set(NF12_BUILD_CUDA_TARGETS OFF)
+if(NF12_HAVE_CUDA AND NOT NF12_TORCH_BACKEND STREQUAL "hip")
+  set(NF12_BUILD_CUDA_TARGETS ON)
+endif()
+set(NF12_BUILD_CUDA_TORCH OFF)
+if(NF12_BUILD_TORCH AND NF12_TORCH_BACKEND STREQUAL "cuda")
+  set(NF12_BUILD_CUDA_TORCH ON)
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-if(NF12_HAVE_CUDA)
+if(NF12_BUILD_CUDA_TARGETS)
 
 find_package(CUDAToolkit REQUIRED)
 message(STATUS "nf12: CUDA ${CUDAToolkit_VERSION}, archs ${CMAKE_CUDA_ARCHITECTURES}")
@@ -128,7 +157,7 @@ set_target_properties(nf12 PROPERTIES
 install(TARGETS nf12 LIBRARY DESTINATION nf12)
 
 # torch.ops.load_library uses the stable ABI without a Python ABI dependency.
-if(NF12_BUILD_TORCH)
+if(NF12_BUILD_CUDA_TORCH)
   find_package(Python COMPONENTS Interpreter REQUIRED)
   execute_process(
     COMMAND "${Python_EXECUTABLE}" -c "import os, torch; print(os.path.dirname(torch.__file__))"

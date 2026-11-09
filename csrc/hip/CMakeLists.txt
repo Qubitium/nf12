@@ -63,6 +63,20 @@ target_compile_options(nf12_hip PRIVATE -O3 -Wall -Wextra)
 # so the op schema, dispatch and graph handling are not duplicated.
 if(NF12_BUILD_TORCH)
   find_package(Python COMPONENTS Interpreter REQUIRED)
+  # Only the HIP wheel can load this extension. Standalone builds do not see the
+  # parent's probe, so repeat it here; a CUDA wheel has no torch_hip and would
+  # also collide with the CUDA subtree's `nf12_torch` target.
+  if(NOT DEFINED NF12_TORCH_BACKEND)
+    execute_process(
+      COMMAND "${Python_EXECUTABLE}" -c
+        "import torch; print('hip' if torch.version.hip is not None else ('cuda' if torch.version.cuda is not None else 'cpu'))"
+      OUTPUT_VARIABLE NF12_TORCH_BACKEND
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      COMMAND_ERROR_IS_FATAL ANY)
+  endif()
+endif()
+
+if(NF12_BUILD_TORCH AND NF12_TORCH_BACKEND STREQUAL "hip")
   execute_process(
     COMMAND "${Python_EXECUTABLE}" -c "import os, torch; print(os.path.dirname(torch.__file__))"
     OUTPUT_VARIABLE NF12_TORCH_DIR
@@ -87,4 +101,6 @@ if(NF12_BUILD_TORCH)
     BUILD_RPATH "$ORIGIN;${NF12_TORCH_DIR}/lib"
     INSTALL_RPATH "$ORIGIN")
   install(TARGETS nf12_torch LIBRARY DESTINATION nf12)
+elseif(NF12_BUILD_TORCH)
+  message(STATUS "nf12: torch backend is ${NF12_TORCH_BACKEND}; skipping the HIP torch extension")
 endif()
