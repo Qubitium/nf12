@@ -125,7 +125,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 template <WeightSource S, int kM>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     linear_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
-                  const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n,
+                  const uint4* __restrict__ escapes, uint32_t base_x4, int64_t /*n*/,
                   int64_t k, int64_t ldx, int64_t ldy, __hip_bfloat16* __restrict__ out,
                   const __hip_bfloat16* __restrict__ bias) {
   // The warp-partial plane is sized for the tokens actually in flight, except
