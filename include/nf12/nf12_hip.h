@@ -95,9 +95,12 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes,
 
 /* bf16t twin of the matrix-core route. Runs the identical (tiles, splits) plan
  * as nf12_hip_linear_wmma so the two are bitwise comparable, which means it
- * needs the same split-K partial plane: size it with
- * nf12_hip_linear_wmma_workspace_bytes(n, k, min(m, nf12_hip_wmma_max_m())).
- * Any m >= 16 is accepted; above nf12_hip_wmma_max_m() the M axis is chunked. */
+ * needs the same split-K partial plane. For m <= nf12_hip_wmma_max_m(), use
+ * nf12_hip_linear_wmma_workspace_bytes(n, k, m). For larger m, use the maximum
+ * of that query at the cap and at m % cap: a tail can need more scratch than
+ * a full chunk. The shared nf12_linear_workspace_bytes(m, n, k, device) query
+ * in nf12.h computes this maximum. Any m >= 16 is accepted on supported
+ * devices; above the cap, the shared dispatcher chunks M and handles tails. */
 hipError_t nf12_hip_linear_wmma_bf16t(const uint8_t* packed, const void* x, void* out,
                                       int64_t n, int64_t k, int64_t m, const void* bias,
                                       void* workspace, size_t workspace_bytes,

@@ -570,14 +570,34 @@ def test_c_abi_linear_large_m_is_supported(lib):
     assert _violations(out, x.double() @ w.double().t()) == 0
 
 
-def test_wmma_bf16t_twin_accepts_large_m(lib):
-    """The twin chunks the M axis above the matrix-core cap."""
+@pytest.mark.parametrize("n,k,m", [
+    (256, 256, 256), (256, 256, 257), (256, 256, 271),
+    (256, 256, 272), (256, 256, 512), (4096, 4096, 288),
+])
+def test_wmma_bf16t_twin_accepts_large_m(lib, n, k, m):
+    """Exercise the native symbol, including small tails and tail-sized scratch."""
     torch.manual_seed(42)
-    n, k, cap = 256, 256, 256
-    w = (torch.randn(n, k, device="cuda") * 0.02).to(torch.bfloat16)
-    wt = nf12.pack_bf16t(w)
-    x = (torch.randn(2 * cap, k, device="cuda") * 0.05).to(torch.bfloat16)
-    got = nf12.linear_bf16t(x, wt)
-    top = nf12.linear_bf16t(x[:cap], wt)
-    bottom = nf12.linear_bf16t(x[cap:], wt)
-    assert got.view(torch.int16).equal(torch.cat([top, bottom]).view(torch.int16))
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        w = (torch.randn(n, k, device="cuda") * 0.02).to(torch.bfloat16)
+        wt = nf12.pack_bf16t(w)
+        packed, escapes, base = _encode(lib, w)
+        weight = _Nf12Weight(packed.data_ptr(), escapes.data_ptr(), escapes.shape[0], n, k, base)
+        x = (torch.randn(m, k, device="cuda") * 0.05).to(torch.bfloat16)
+        need = lib.nf12_linear_workspace_bytes(m, n, k, torch.cuda.current_device())
+        ws = torch.full((need + 32,), 0xA5, dtype=torch.uint8, device="cuda")
+        guarded = torch.full((m + 2, n), -7., dtype=torch.bfloat16, device="cuda")
+        got = guarded[1:-1]
+        args = (wt.data_ptr(), x.data_ptr(), got.data_ptr(), n, k, m, None, ws.data_ptr())
+        if need:
+            assert lib.nf12_hip_linear_wmma_bf16t(*args, need - 1, _stream()) == 1
+            assert bool((guarded == -7).all())
+        assert lib.nf12_hip_linear_wmma_bf16t(*args, need, _stream()) == 0
+        ref = torch.empty_like(got)
+        assert lib.nf12_linear(x.data_ptr(), m, k, ctypes.byref(weight), None,
+                               ref.data_ptr(), n, ws.data_ptr(), need, _stream()) == 0
+    stream.synchronize()
+    assert bool(torch.isfinite(got).all())
+    assert torch.equal(got.view(torch.int16), ref.view(torch.int16))
+    assert bool((guarded[[0, -1]] == -7).all())
+    assert bool((ws[need:] == 0xA5).all())

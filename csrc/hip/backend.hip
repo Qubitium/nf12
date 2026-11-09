@@ -132,3 +132,18 @@ cudaError_t embedding(const uint8_t* packed, const void* escapes, uint32_t count
                              n, k, ids32, ids64, num_ids, out, ldo, stream);
 }
 }  // namespace nf12::backend
+
+// Reuse the shared validation and chunk dispatcher, including small-M tails
+// and workspace rejection before any output writes. The dispatcher calls the
+// strided kernel entry points, so this native wrapper does not recurse.
+extern "C" hipError_t nf12_hip_linear_wmma_bf16t(
+    const uint8_t* packed, const void* x, void* out, int64_t n, int64_t k, int64_t m,
+    const void* bias, void* workspace, size_t workspace_bytes, hipStream_t stream) {
+  if (m < 16) return hipErrorInvalidValue;
+  const auto status = nf12_linear_bf16t(x, m, k, packed, n, k, bias, out, n,
+                                       workspace, workspace_bytes, stream);
+  if (status == NF12_OK) return hipSuccess;
+  if (status == NF12_ERROR_UNSUPPORTED) return hipErrorNotSupported;
+  if (status == NF12_ERROR_CUDA) return nf12_last_cuda_error();
+  return hipErrorInvalidValue;
+}

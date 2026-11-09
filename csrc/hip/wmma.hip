@@ -865,14 +865,6 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uin
                                                workspace, workspace_bytes, stream, k, n);
 }
 
-// bf16t twin of the matrix-core route (SPEC.md 4.4).
-hipError_t nf12_hip_linear_wmma_bf16t(const uint8_t* packed, const void* x, void* out, int64_t n,
-                                      int64_t k, int64_t m, const void* bias, void* workspace,
-                                      size_t workspace_bytes, hipStream_t stream) {
-  return linear_wmma_impl<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias,
-                                                workspace, workspace_bytes, stream, k, n);
-}
-
 // MoE routes. The nf12 form takes a per-expert codec; the bf16t form does not.
 hipError_t nf12_hip_moe_linear(const uint8_t* packed, const uint4* escapes,
                                const int64_t* escape_offsets, const uint8_t* exp_base,
