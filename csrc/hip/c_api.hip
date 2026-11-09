@@ -11,6 +11,7 @@
 // Adapted from GPT-QModel (https://github.com/ModelCloud/GPTQModel) by Qubitium.
 
 #include "c_api_common.cuh"
+#include "linear.h"
 
 #include "nf12/nf12.h"
 #include "nf12/nf12_hip.h"
@@ -131,18 +132,14 @@ nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12
   if (!valid_bf16_matrix(x_bf16, w->k, ldx) || !valid_bf16_matrix(y_bf16, w->n, ldy)) {
     return NF12_ERROR_INVALID_ARGUMENT;
   }
-  // HIP kernels address x and y as contiguous rows of k and n, so unlike CUDA
-  // they cannot honour a wider leading dimension. Reject rather than compute the
-  // wrong rows.
-  if (ldx != w->k || ldy != w->n) return NF12_ERROR_INVALID_ARGUMENT;
   if (workspace_bytes < nf12_linear_workspace_bytes(m, w->n, w->k, 0)) {
     return NF12_ERROR_INSUFFICIENT_WORKSPACE;
   }
   if (m < 16) {
-    return status(nf12_hip_linear_fused(static_cast<const uint8_t*>(w->packed),
+    return status(nf12_hip::linear_fused_strided(static_cast<const uint8_t*>(w->packed),
                                         static_cast<const uint4*>(w->escapes),
                                         w->exp_base, x_bf16, y_bf16, w->n, w->k, m, bias_bf16,
-                                        stream));
+                                        ldx, ldy, false, stream));
   }
   // Above the matrix-core M cap the CUDA build decodes row slices and runs its
   // own GEMM. HIP has no in-library GEMM, so the same contract is met by
@@ -152,17 +149,17 @@ nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12
   const int64_t chunk = nf12_hip_wmma_max_m();
   for (int64_t m0 = 0; m0 < m; ) {
     const int64_t rows = std::min(chunk, m - m0);
-    const auto* xs = static_cast<const uint8_t*>(x_bf16) + m0 * w->k * 2;
-    auto* ys = static_cast<uint8_t*>(y_bf16) + m0 * w->n * 2;
+    const auto* xs = static_cast<const uint8_t*>(x_bf16) + m0 * ldx * 2;
+    auto* ys = static_cast<uint8_t*>(y_bf16) + m0 * ldy * 2;
     const nf12_status_t rc =
         rows < 16
-            ? status(nf12_hip_linear_fused(static_cast<const uint8_t*>(w->packed),
+            ? status(nf12_hip::linear_fused_strided(static_cast<const uint8_t*>(w->packed),
                                            static_cast<const uint4*>(w->escapes), w->exp_base,
-                                           xs, ys, w->n, w->k, rows, bias_bf16, stream))
-            : status(nf12_hip_linear_wmma(static_cast<const uint8_t*>(w->packed),
+                                           xs, ys, w->n, w->k, rows, bias_bf16, ldx, ldy, false, stream))
+            : status(nf12_hip::linear_wmma_strided(static_cast<const uint8_t*>(w->packed),
                                           static_cast<const uint4*>(w->escapes), w->exp_base, xs,
                                           ys, w->n, w->k, rows, bias_bf16, workspace,
-                                          workspace_bytes, stream));
+                                          workspace_bytes, ldx, ldy, false, stream));
     if (rc != NF12_OK) return rc;
     m0 += rows;
   }
@@ -203,7 +200,6 @@ nf12_status_t nf12_linear_bf16t(const void* x_bf16, int64_t m, int64_t ldx, cons
   if (!valid_bf16_matrix(x_bf16, k, ldx) || !valid_bf16_matrix(y_bf16, n, ldy)) {
     return NF12_ERROR_INVALID_ARGUMENT;
   }
-  if (ldx != k || ldy != n) return NF12_ERROR_INVALID_ARGUMENT;
   // The twin runs the same (tiles, splits) plan as the nf12 route so the two
   // are bitwise comparable, and that plan needs the split-K partial plane.
   if (workspace_bytes < nf12_linear_workspace_bytes(m, n, k, 0)) {
@@ -213,13 +209,13 @@ nf12_status_t nf12_linear_bf16t(const void* x_bf16, int64_t m, int64_t ldx, cons
   const int64_t chunk = nf12_hip_wmma_max_m();
   for (int64_t m0 = 0; m0 < m; ) {
     const int64_t rows = std::min(chunk, m - m0);
-    const auto* xs = static_cast<const uint8_t*>(x_bf16) + m0 * k * 2;
-    auto* ys = static_cast<uint8_t*>(y_bf16) + m0 * n * 2;
+    const auto* xs = static_cast<const uint8_t*>(x_bf16) + m0 * ldx * 2;
+    auto* ys = static_cast<uint8_t*>(y_bf16) + m0 * ldy * 2;
     const nf12_status_t rc =
         rows < 16
-            ? status(nf12_hip_linear_fused_bf16t(packed, xs, ys, n, k, rows, bias_bf16, stream))
-            : status(nf12_hip_linear_wmma_bf16t(packed, xs, ys, n, k, rows, bias_bf16, workspace,
-                                                workspace_bytes, stream));
+            ? status(nf12_hip::linear_fused_strided(packed, nullptr, 0, xs, ys, n, k, rows, bias_bf16, ldx, ldy, true, stream))
+            : status(nf12_hip::linear_wmma_strided(packed, nullptr, 0, xs, ys, n, k, rows, bias_bf16, workspace,
+                                                workspace_bytes, ldx, ldy, true, stream));
     if (rc != NF12_OK) return rc;
     m0 += rows;
   }

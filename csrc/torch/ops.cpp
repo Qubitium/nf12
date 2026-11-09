@@ -51,14 +51,7 @@ Tensor byte_buffer(const Tensor& like, size_t bytes) {
 // A single row does not constrain the row stride.
 Tensor vector_rows(const Tensor& t) {
   auto ok = [](const Tensor& v) {
-    bool rows = v.size(0) <= 1 || (v.stride(0) % 8 == 0 && v.stride(0) >= v.size(1));
-#ifdef NF12_HIP
-    // The HIP kernels address x and y as contiguous rows, so a padded row
-    // stride cannot be forwarded: the C ABI rejects it and a kernel that took
-    // it would read the wrong rows. Normalize here instead of preserving the
-    // padding the CUDA kernels accept.
-    rows = rows && (v.size(0) <= 1 || v.stride(0) == v.size(1));
-#endif
+    const bool rows = v.size(0) <= 1 || (v.stride(0) % 8 == 0 && v.stride(0) >= v.size(1));
     return v.stride(1) == 1 && rows && aligned16(v.data_ptr());
   };
   if (ok(t)) return t;

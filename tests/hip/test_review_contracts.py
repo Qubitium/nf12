@@ -121,3 +121,36 @@ def test_bf16t_rejects_misaligned_bias_before_writing(abi, m):
     assert abi.nf12_linear_bf16t(x.data_ptr(), m, k, twin.data_ptr(), n, k,
                                 bias.data_ptr(), out.data_ptr(), n, None, 0, _stream()) == 1
     assert bool((out == -7).all())
+
+
+@pytest.mark.parametrize("m", [1, 15, 16, 17, 64, 128, 256, 257, 272])
+def test_padded_linear_strides_preserve_guard_columns(abi, m):
+    n, k = 256, 512
+    generator = torch.Generator(device="cuda").manual_seed(m)
+    w = (torch.randn(n, k, device="cuda", generator=generator) * .02).bfloat16()
+    nw, twin = nf12.encode(w), nf12.pack_bf16t(w)
+    cw = _Nf12Weight(nw.packed.data_ptr(), nw.escapes.data_ptr(), nw.num_escapes, n, k, nw.exp_base)
+    xpad = (torch.randn(m, k + 8, device="cuda", generator=generator) * .05).bfloat16()
+    x = xpad[:, :k]
+    dense_x = x.contiguous()
+    bias = (torch.randn(n, device="cuda", generator=generator) * .01).bfloat16()
+    need = abi.nf12_linear_workspace_bytes(m, n, k, torch.cuda.current_device())
+    ws = torch.empty(max(1, need), device="cuda", dtype=torch.uint8)
+    expected = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+    assert abi.nf12_linear(dense_x.data_ptr(), m, k, C.byref(cw), bias.data_ptr(),
+                           expected.data_ptr(), n, ws.data_ptr(), need, _stream()) == 0
+    for bf16t in (False, True):
+        guarded = torch.full((m + 2, n + 8), -7., device="cuda", dtype=torch.bfloat16)
+        out = guarded[1:-1, :n]
+        if bf16t:
+            rc = abi.nf12_linear_bf16t(x.data_ptr(), m, x.stride(0), twin.data_ptr(), n, k,
+                                       bias.data_ptr(), out.data_ptr(), out.stride(0),
+                                       ws.data_ptr(), need, _stream())
+        else:
+            rc = abi.nf12_linear(x.data_ptr(), m, x.stride(0), C.byref(cw), bias.data_ptr(),
+                                 out.data_ptr(), out.stride(0), ws.data_ptr(), need, _stream())
+        assert rc == 0
+        torch.cuda.synchronize()
+        assert bool((guarded[[0, -1]] == -7).all())
+        assert bool((guarded[:, n:] == -7).all())
+        assert torch.equal(out.contiguous().view(torch.int16), expected.view(torch.int16))

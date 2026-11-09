@@ -25,6 +25,7 @@
 // bit-identical to the CUDA `nf12.decode` output.
 // ---------------------------------------------------------------------------
 #include "format_hip.cuh"
+#include "linear.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -125,7 +126,7 @@ template <WeightSource S, int kM>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     linear_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
                   const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n,
-                  int64_t k, __hip_bfloat16* __restrict__ out,
+                  int64_t k, int64_t ldx, int64_t ldy, __hip_bfloat16* __restrict__ out,
                   const __hip_bfloat16* __restrict__ bias) {
   // The warp-partial plane is sized for the tokens actually in flight, except
   // at kM == 1 where it is deliberately over-allocated. That kernel carries two
@@ -180,7 +181,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         reinterpret_cast<const __hip_bfloat162*>(x + kb * kSuperAtomCols);
 
     for (int mi = 0; mi < kM; ++mi) {
-      dot_super_atom(regs, xrow + mi * (k / 2), t, acc[mi][0], acc[mi][1]);
+      dot_super_atom(regs, xrow + mi * (ldx / 2), t, acc[mi][0], acc[mi][1]);
     }
   }
 
@@ -214,7 +215,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     // 0.5 ULP / 7e-5 here, and the CUDA kernel also accumulates bias in FP32
     // before writing BF16 (csrc/linear/small_m.cu).
     if (bias != nullptr) sum += __bfloat162float(bias[n0 + row]);
-    out[mi * n + n0 + row] = __float2bfloat16(sum);
+    out[mi * ldy + n0 + row] = __float2bfloat16(sum);
   }
 }
 
@@ -222,7 +223,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 template <WeightSource S>
 hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
                         const void* x, void* out, int64_t n, int64_t k, int64_t m,
-                        const void* bias, hipStream_t stream) {
+                        const void* bias, hipStream_t stream, int64_t ldx, int64_t ldy) {
   if (m < 1 || m > kFusedMaxM) return hipErrorInvalidValue;
   // n / 16 below would otherwise round a 24-row weight down to one 16-row block
   // and write only part of the caller's output.
@@ -243,7 +244,7 @@ hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t ex
 #define NF12_AD_FUSED_LAUNCH(K)                                                              \
   linear_kernel<S, K><<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>( \
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), \
-      escapes, exp_base_x4(exp_base), n, k, reinterpret_cast<__hip_bfloat16*>(out),       \
+      escapes, exp_base_x4(exp_base), n, k, ldx, ldy, reinterpret_cast<__hip_bfloat16*>(out),       \
       reinterpret_cast<const __hip_bfloat16*>(bias))
   switch (m) {
     case 1: NF12_AD_FUSED_LAUNCH(1); break;
@@ -268,6 +269,17 @@ hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t ex
 }
 
 }  // namespace
+
+hipError_t linear_fused_strided(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                               const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                               const void* bias, int64_t ldx, int64_t ldy, bool bf16t,
+                               hipStream_t stream) {
+  if (exp_base > uint32_t(kMaxExpBase) || ldx < k || ldy < n) return hipErrorInvalidValue;
+  if (bf16t) return launch_fused<WeightSource::kBf16t>(packed, nullptr, 0, x, out, n, k, m,
+                                                     bias, stream, ldx, ldy);
+  return launch_fused<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m,
+                                          bias, stream, ldx, ldy);
+}
 
 }  // namespace nf12_hip
 
@@ -342,7 +354,7 @@ hipError_t nf12_hip_linear_fused(const uint8_t* packed, const uint4* escapes, ui
                                 int64_t m, const void* bias, hipStream_t stream) {
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   return launch_fused<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m, bias,
-                                           stream);
+                                           stream, k, n);
 }
 
 // bf16t twin of the small-M route (SPEC.md 4.4): same kernel, uncompressed
@@ -350,7 +362,7 @@ hipError_t nf12_hip_linear_fused(const uint8_t* packed, const uint4* escapes, ui
 hipError_t nf12_hip_linear_fused_bf16t(const uint8_t* packed, const void* x, void* out,
                                       int64_t n, int64_t k, int64_t m, const void* bias,
                                       hipStream_t stream) {
-  return launch_fused<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias, stream);
+  return launch_fused<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias, stream, k, n);
 }
 
 }  // extern "C"

@@ -45,6 +45,7 @@
 // translation unit there and the caller keeps the decode-then-GEMM route.
 // ---------------------------------------------------------------------------
 #include "format_hip.cuh"
+#include "linear.h"
 
 // The launcher templates below run before the C entry points are defined, so
 // the two queries they need are declared here instead of pulling in the whole
@@ -200,7 +201,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       return *reinterpret_cast<const WmmaA*>(x + in * route.ldx + kb * kSuperAtomCols +
                                              16 * j + 8 * (lane >> 4));
     } else {
-      return wmma_row_frag(x + tr * k + kb * kSuperAtomCols + 16 * j, k, lane);
+      return wmma_row_frag(x + tr * route.ldx + kb * kSuperAtomCols + 16 * j, route.ldx, lane);
     }
   };
 
@@ -404,7 +405,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         if (route.row_scale != nullptr) v *= route.row_scale[o];
         out[o * route.ldy + col] = __float2bfloat16(v);
       } else if (kSplits == 1) {
-        out[row * n + col] = __float2bfloat16(v);
+        out[row * route.ldy + col] = __float2bfloat16(v);
       } else {
         part[row * n + col] = v;
       }
@@ -417,12 +418,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // is identical to a single-pass FP32 accumulation followed by one rounding
 // (splitting K only changes the association order of the FP32 adds).
 __global__ void wmma_reduce_kernel(const float* __restrict__ partial, __hip_bfloat16* __restrict__ out,
-                                   int64_t total, int splits) {
+                                   int64_t total, int splits, int64_t n, int64_t ldy) {
   for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < total;
        i += int64_t(gridDim.x) * blockDim.x) {
     float s = partial[i];
     for (int j = 1; j < splits; ++j) s += partial[int64_t(j) * total + i];
-    out[i] = __float2bfloat16(s);
+    const int64_t dst = ldy == n ? i : (i / n) * ldy + i % n;
+    out[dst] = __float2bfloat16(s);
   }
 }
 
@@ -602,7 +604,7 @@ template <WeightSource Src>
 static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
                                    uint32_t exp_base, const void* x, void* out, int64_t n,
                                    int64_t k, int64_t m, const void* bias, void* workspace,
-                                   size_t workspace_bytes, hipStream_t stream) {
+                                   size_t workspace_bytes, hipStream_t stream, int64_t ldx, int64_t ldy) {
   if constexpr (Src == WeightSource::kNf12) {
     if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   }
@@ -649,7 +651,9 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
 
   const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(m_blocks),
                   static_cast<unsigned>(splits));
-  const WmmaRoute route{};
+  WmmaRoute route{};
+  route.ldx = ldx;
+  route.ldy = ldy;
 
 #define NF12_AD_LAUNCH(SRC, ROUTED, T, SPL, D, P)                                          \
   wmma_kernel<SRC, ROUTED, T, SPL, D, P><<<grid, kThreadsPerBlock, 0, stream>>>(           \
@@ -739,7 +743,7 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
     if (rb > 128) rb = 128;
     const int reduce_blocks = rb;
     wmma_reduce_kernel<<<reduce_blocks, 256, 0, stream>>>(
-        partial, reinterpret_cast<__hip_bfloat16*>(out), total, splits);
+        partial, reinterpret_cast<__hip_bfloat16*>(out), total, splits, n, ldy);
     status = hipGetLastError();
   }
   return status;
@@ -789,6 +793,17 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),
       escapes, 0u, n, k, 0, reinterpret_cast<__hip_bfloat16*>(out), nullptr, nullptr, route);
   return hipGetLastError();
+}
+
+hipError_t nf12_hip::linear_wmma_strided(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                                       const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                                       const void* bias, void* workspace, size_t workspace_bytes,
+                                       int64_t ldx, int64_t ldy, bool bf16t, hipStream_t stream) {
+  if (ldx < k || ldy < n) return hipErrorInvalidValue;
+  if (bf16t) return linear_wmma_impl<WeightSource::kBf16t>(packed, nullptr, 0, x, out, n, k, m,
+                                                        bias, workspace, workspace_bytes, stream, ldx, ldy);
+  return linear_wmma_impl<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m,
+                                              bias, workspace, workspace_bytes, stream, ldx, ldy);
 }
 
 extern "C" {
@@ -842,7 +857,7 @@ hipError_t nf12_hip_linear_wmma(const uint8_t* packed, const uint4* escapes, uin
                                 const void* bias, void* workspace, size_t workspace_bytes,
                                 hipStream_t stream) {
   return linear_wmma_impl<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m, bias,
-                                               workspace, workspace_bytes, stream);
+                                               workspace, workspace_bytes, stream, k, n);
 }
 
 // bf16t twin of the matrix-core route (SPEC.md 4.4).
@@ -850,7 +865,7 @@ hipError_t nf12_hip_linear_wmma_bf16t(const uint8_t* packed, const void* x, void
                                       int64_t k, int64_t m, const void* bias, void* workspace,
                                       size_t workspace_bytes, hipStream_t stream) {
   return linear_wmma_impl<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias,
-                                                workspace, workspace_bytes, stream);
+                                                workspace, workspace_bytes, stream, k, n);
 }
 
 // MoE routes. The nf12 form takes a per-expert codec; the bf16t form does not.
