@@ -28,6 +28,7 @@ def abi(lib):
         ("nf12_moe_linear", C.c_int, [p, i, p, i, p, p, i, C.POINTER(MoeWeight), p, p, i, p, sz, p]),
         ("nf12_moe_decode", C.c_int, [C.POINTER(MoeWeight), p, i, i, i, p, i, p]),
         ("nf12_linear_workspace_bytes", sz, [i, i, i, C.c_int]),
+        ("nf12_linear_decode_gemm_rows", i, [i, i, i, C.c_int]),
         ("nf12_linear_bf16t", C.c_int, [p, i, i, p, i, i, p, p, i, p, sz, p]),
     ]:
         fn = getattr(lib, name)
@@ -154,3 +155,28 @@ def test_padded_linear_strides_preserve_guard_columns(abi, m):
         assert bool((guarded[[0, -1]] == -7).all())
         assert bool((guarded[:, n:] == -7).all())
         assert torch.equal(out.contiguous().view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.parametrize("n,k", [(4096, 4096), (14336, 4096), (65536, 4096), (65552, 4096)])
+def test_decode_slice_budget(abi, n, k):
+    rows = abi.nf12_linear_decode_gemm_rows(512, n, k, torch.cuda.current_device())
+    assert rows % 16 == 0 and 16 <= rows <= n
+    assert rows * k * 2 <= 256 * 1024 * 1024
+    if n * k * 2 <= 256 * 1024 * 1024:
+        assert rows == n
+
+
+@pytest.mark.parametrize("m,n,k", [(257, 4096, 4096), (512, 4096, 4096), (257, 65552, 2048)])
+def test_decode_slices_match_bf16_gemm(abi, m, n, k):
+    generator = torch.Generator(device="cuda").manual_seed(11)
+    w = (torch.randn(n, k, device="cuda", generator=generator) * .02).bfloat16()
+    x = (torch.randn(m, k, device="cuda", generator=generator) * .05).bfloat16()
+    bias = (torch.randn(n, device="cuda", generator=generator) * .01).bfloat16()
+    nw = nf12.encode(w)
+    rows = abi.nf12_linear_decode_gemm_rows(m, n, k, torch.cuda.current_device())
+    expected = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+    for start in range(0, n, rows):
+        end = min(start + rows, n)
+        torch.addmm(bias[start:end], x, w[start:end].t(), out=expected[:, start:end])
+    out = nf12.linear(x, nw, bias)
+    assert torch.equal(out.view(torch.int16), expected.view(torch.int16))

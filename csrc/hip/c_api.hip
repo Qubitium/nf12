@@ -176,7 +176,12 @@ int64_t nf12_linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, int device
   // layer must decode and call torch's GEMM instead of launching an empty
   // kernel.
   if (m <= nf12_hip_wmma_max_m() && nf12_hip_wmma_supported_device(m, device)) return 0;
-  return 64;
+  // Match CUDA's external decode/GEMM budget. Equal tile-aligned slices avoid
+  // tiny final GEMMs; the temporary buffer is reused only within this call.
+  constexpr int64_t kSliceBytes = int64_t(256) << 20;
+  const int64_t cap = std::max<int64_t>(16, kSliceBytes / (2 * k) / 16 * 16);
+  const int64_t slices = (n + cap - 1) / cap;
+  return (n / 16 + slices - 1) / slices * 16;
 }
 
 nf12_status_t nf12_pack_bf16t(const void* w, int64_t n, int64_t k, int64_t ldw, void* out,
