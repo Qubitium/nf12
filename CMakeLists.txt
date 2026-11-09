@@ -49,35 +49,10 @@ if(NOT NF12_BUILD_NATIVE)
   return()
 endif()
 
-option(NF12_ENABLE_HIP "Build the RDNA4 HIP kernels (libnf12_hip.so)" OFF)
-
-# CUDA is optional so an ROCm-only host can build the HIP kernels without a CUDA
-# toolkit. NF12_CUDA_ARCHS is still parsed above, which sets
-# CMAKE_CUDA_ARCHITECTURES before the language is enabled below.
-include(CheckLanguage)
-check_language(CUDA)
-if(CMAKE_CUDA_COMPILER)
-  enable_language(CUDA)
-  set(NF12_HAVE_CUDA ON)
-else()
-  set(NF12_HAVE_CUDA OFF)
-  message(STATUS "nf12: no CUDA compiler found; skipping the CUDA targets")
-endif()
-
-if(NOT NF12_HAVE_CUDA AND NOT NF12_ENABLE_HIP)
-  message(FATAL_ERROR
-    "nf12: neither a CUDA compiler nor NF12_ENABLE_HIP is available. Install the "
-    "CUDA toolkit, or configure with -DNF12_ENABLE_HIP=ON on an ROCm host.")
-endif()
-
 # Shared by both backends: the torch extension is the same op layer on CUDA
-# (linking libnf12.so) and ROCm (linking libnf12_hip.so).
+# (linking libnf12.so) and ROCm (linking libnf12_hip.so). Probe the installed
+# wheel before choosing backend defaults: a ROCm host may also have nvcc.
 option(NF12_BUILD_TORCH "Build the torch extension (libnf12_torch.so)" ON)
-
-# Which torch wheel is installed decides which extension to build. A ROCm host
-# can have nvcc on PATH and a CUDA host can ship a ROCm wheel; selecting from
-# compiler discovery alone then links a library the wheel does not provide
-# (torch_cuda on ROCm) and defines `nf12_torch` twice when both subtrees run.
 if(NF12_BUILD_TORCH)
   find_package(Python COMPONENTS Interpreter REQUIRED)
   execute_process(
@@ -89,6 +64,37 @@ if(NF12_BUILD_TORCH)
   message(STATUS "nf12: torch backend is ${NF12_TORCH_BACKEND}")
 else()
   set(NF12_TORCH_BACKEND "none")
+endif()
+
+set(_nf12_hip_default OFF)
+if(NF12_TORCH_BACKEND STREQUAL "hip")
+  set(_nf12_hip_default ON)
+endif()
+option(NF12_ENABLE_HIP "Build the RDNA4 HIP kernels (libnf12_hip.so)" ${_nf12_hip_default})
+if(NF12_TORCH_BACKEND STREQUAL "hip" AND NOT NF12_ENABLE_HIP)
+  message(FATAL_ERROR "nf12: the installed torch wheel uses ROCm; enable NF12_ENABLE_HIP")
+endif()
+
+# CUDA is optional, and a ROCm torch wheel does not need nvcc even if it is
+# installed. NF12_CUDA_ARCHS is parsed above before CUDA is enabled.
+include(CheckLanguage)
+if(NF12_TORCH_BACKEND STREQUAL "hip")
+  set(NF12_HAVE_CUDA OFF)
+else()
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    set(NF12_HAVE_CUDA ON)
+  else()
+    set(NF12_HAVE_CUDA OFF)
+    message(STATUS "nf12: no CUDA compiler found; skipping the CUDA targets")
+  endif()
+endif()
+
+if(NOT NF12_HAVE_CUDA AND NOT NF12_ENABLE_HIP)
+  message(FATAL_ERROR
+    "nf12: neither a CUDA compiler nor NF12_ENABLE_HIP is available. Install the "
+    "CUDA toolkit, or configure with -DNF12_ENABLE_HIP=ON on an ROCm host.")
 endif()
 
 # The CUDA kernels are built unless torch is the ROCm wheel. The CUDA torch

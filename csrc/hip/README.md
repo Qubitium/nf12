@@ -38,10 +38,9 @@ cmake -S csrc/hip -B build-hip -DNF12_HIP_ARCHS="gfx1201"
 cmake --build build-hip -j
 ```
 
-produces `libnf12_hip.so`. Or enable it from the top-level build with
-`-DNF12_ENABLE_HIP=ON`, which is additive and does not alter any CUDA target.
-On a host with no CUDA compiler the top-level build now skips the CUDA targets
-instead of failing, so this is the normal path on ROCm:
+produces `libnf12_hip.so`. A top-level build with ROCm PyTorch selects HIP by
+default, even if `nvcc` is installed. With `NF12_BUILD_TORCH=OFF`, enable HIP
+explicitly:
 
 ```sh
 cmake -S . -B build -G Ninja -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=OFF \
@@ -49,9 +48,9 @@ cmake -S . -B build -G Ninja -DNF12_ENABLE_HIP=ON -DNF12_BUILD_TORCH=OFF \
 cmake --build build --target nf12_hip -j
 ```
 
-`nf12._jit` uses exactly that configuration: on a ROCm build it detects the
-visible `gfx` targets, builds `libnf12_hip.so` into the per-user cache, and
-`nf12.library_path()` resolves to it. Note for CMake >= 4.2:
+On ROCm, `nf12._jit` detects visible `gfx` targets and builds both
+`libnf12_hip.so` and `libnf12_torch.so` into the per-user cache.
+`nf12.library_path()` resolves the HIP library. Note for CMake >= 4.2:
 `CMAKE_HIP_COMPILER` must point at `amdclang++` directly; the `hipcc` wrapper
 is rejected.
 
