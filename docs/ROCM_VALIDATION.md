@@ -9,14 +9,14 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 607 | 12 | 1 |
-| Shared API | RTX 4090 | 545 | 20 | 1 |
+| HIP + shared API | R9700 | 600 | 12 | 1 |
+| Shared API | RTX 4090 | 545 | 16 | 1 |
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
 with two visible GPUs to exercise concurrent device/stream propagation. The
 backend-neutral cases live in `tests/api` and run on either runtime; `tests/hip`
-holds the 54 native `nf12_hip_*`, RDNA4 dispatch and HIP graph cases that have no
-CUDA counterpart. The 8 extra CUDA skips are decode-slice tests whose device
+holds the 51 native `nf12_hip_*`, RDNA4 dispatch and HIP graph cases that have no
+CUDA counterpart. The 4 extra CUDA skips are decode-slice tests whose device
 selects the fused route instead. The known CUDA MoE
 reference-tolerance case tracked separately in PR #7 is explicitly deselected;
 these counts do not claim it passes. The CUDA-only format-header helper is
@@ -79,7 +79,7 @@ context. All three confirmed findings are fixed:
   All 1581056 output elements match the NF12 C-API twin bitwise; all outputs
   are finite and guards are unchanged.
 
-The current PR suites above passed in 27.28 s (HIP) and 19.41 s (CUDA), with
+The current PR suites above passed in 27.17 s (HIP) and 22.07 s (CUDA), with
 GIL disabled and two visible devices. The benchmark/device selection fix does
 not establish new performance numbers for the canonical shape grid.
 

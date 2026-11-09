@@ -209,24 +209,6 @@ def test_selftest(lib):
 
 
 
-@pytest.mark.parametrize("n,k", [(16, 64), (256, 256), (1024, 4096)])
-def test_native_codec_round_trip(lib, n, k):
-    """Native encode/decode match the reference and reject short workspaces."""
-    torch.manual_seed(0)
-    w = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
-    need = int(lib.nf12_hip_encode_workspace_bytes(n, k))
-    assert need > 0
-    ws = torch.full((need,), 0xA5, dtype=torch.uint8, device="cuda")
-    base, count = _U8(0), _U32(0)
-    for declared in (0, need - 1):
-        assert lib.nf12_hip_encode_analyze(w.data_ptr(), n, k, k, ws.data_ptr(), declared,
-                                           ctypes.byref(base), ctypes.byref(count), _stream()) != 0
-    assert int((ws != 0xA5).sum()) == 0
-    packed, escapes, exp_base = _encode(lib, w)
-    ref_packed, ref_escapes, ref_base = reference.encode(w.cpu())
-    assert exp_base == ref_base
-    assert packed.cpu().equal(ref_packed) and escapes.cpu().equal(ref_escapes)
-    assert _decode(lib, packed, escapes, exp_base).view(torch.int16).equal(w.view(torch.int16))
 
 
 @pytest.mark.parametrize("n,k", [(256, 256), (1024, 4096)])

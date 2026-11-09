@@ -181,15 +181,6 @@ def test_padded_linear_strides_preserve_guard_columns(abi, m):
             assert torch.equal(again.view(torch.int16), expected.view(torch.int16))
 
 
-@pytest.mark.parametrize("n,k", [(4096, 4096), (14336, 4096), (65536, 4096), (65552, 4096)])
-def test_decode_slice_budget(abi, n, k):
-    rows = abi.nf12_linear_decode_gemm_rows(512, n, k, torch.cuda.current_device())
-    if rows == 0:
-        pytest.skip("this backend selects the fused route for these shapes")
-    assert rows % 16 == 0 and 16 <= rows <= n
-    assert rows * k * 2 <= 256 * 1024 * 1024
-    if n * k * 2 <= 256 * 1024 * 1024:
-        assert rows == n
 
 
 @pytest.mark.parametrize("m,n,k", [(257, 4096, 4096), (512, 4096, 4096), (257, 65552, 2048)])

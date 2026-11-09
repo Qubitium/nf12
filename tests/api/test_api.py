@@ -133,6 +133,14 @@ def test_linear_decode_gemm_rows(lib):
         rows = lib.nf12_linear_decode_gemm_rows(m, n, k, dev)
         assert rows == lib.nf12_linear_decode_gemm_rows(m, n, k, dev)
         assert rows == 0 or (rows % 16 == 0 and 16 <= rows <= n)
+    # The slice height also respects the 256 MiB external decode budget.
+    for n, k in [(4096, 4096), (14336, 4096), (65536, 4096), (65552, 4096)]:
+        rows = lib.nf12_linear_decode_gemm_rows(512, n, k, dev)
+        if rows == 0:
+            continue  # this device selects the fused route for the shape
+        assert rows % 16 == 0 and 16 <= rows <= n and rows * k * 2 <= 256 * 1024 * 1024
+        if n * k * 2 <= 256 * 1024 * 1024:
+            assert rows == n
 
 
 def test_round_trip_and_linear(lib):
