@@ -130,7 +130,10 @@ launch measured ~11 µs of host time, more than the split saves.
 
 Route selection by token count: `m <= 15` uses the fused small-M kernel,
 `16 <= m <= 256` the matrix-core path, and larger `m` falls back to
-decode-then-rocBLAS. `m=16` is a single 16-token tile and is faster than the
+decode-then-rocBLAS in the torch layer. Decoded slices follow CUDA's 256 MiB
+external-buffer budget (at least one 16-row tile), with storage local to the
+current call. The raw C API uses native M chunks and a caller-owned workspace.
+`m=16` is a single 16-token tile and is faster than the
 fused kernel on every measured shape. `gfx1250` has no `wmma-128b-insts`;
 `wmma.hip` compiles to an empty translation unit there and
 `nf12_hip_wmma_supported` returns 0.
@@ -251,14 +254,17 @@ follow-up, and it is why the MoE GEMM is not claimed to be tensor-core optimal.
 * **Encode** is byte-identical to the reference codec — same `exp_base`, same
   packed bytes, same escape order — verified over 30 cases spanning
   `16x64 … 11008x4096` and five weight distributions.
-* **Fused linear** is gated on the contract in SPEC.md §6.2: it must equal a
-  BF16 GEMM over the *exactly decoded* weight. The test computes that twin
-  (`decode` + `torch.nn.functional.linear`, both BF16) and requires **0
-  violations** of `|err| <= 2e-3 + 2e-3*|ref|`. A separate FP64 oracle is
-  kept as a tighter secondary check over 21 shapes (256², 1024×4096, 4096×4096
-  × `m ∈ {1,16,17,32,33,48,64,96,128,256}`); it also reports 0 violations with
-  `rms_rel ≈ 1.66e-3`, the oracle's own BF16 rounding floor. NF12 itself adds
-  no error; the residual is FP32 accumulation order.
+* **Fused linear** must match the same-configuration BF16t kernel bit for bit
+  (SPEC.md §6.2). Dense BF16 GEMM is a separate §6.3 comparison, using
+  `|err| <= 2e-3 + 2e-3*|ref|` and rejecting non-finite results. Decode/GEMM
+  routes match the same GEMMs on exactly decoded BF16 slices (§6.5).
+* **C ABI** preserves padded input/output row strides, normalizes malformed
+  MoE offsets like CUDA, and checks workspace requirements for both full
+  M chunks and their tails before launching. Empty routing returns zero
+  offsets without scratch storage.
+
+See [ROCm validation and performance](../../docs/ROCM_VALIDATION.md) for
+review regression coverage, fallback timings and encoder measurements.
 
 ## Performance (R9700, `gfx1201`, 32 CUs, wave32)
 

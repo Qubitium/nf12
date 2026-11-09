@@ -80,9 +80,10 @@ Use `-DNF12_HIP_ARCHS=gfx1200` for a `gfx1200` GPU, or drop
 configuration automatically on a ROCm host, so `import nf12` is enough for a
 source checkout.
 
-Fused linear kernels support batches of 1–256 tokens. For larger batches the
-caller must decode the weights and run a BF16 GEMM (the torch layer does this
-for you).
+Fused linear kernels support batches of 1–256 tokens. For larger batches,
+the torch API decodes bounded slices and runs BF16 GEMMs; the raw C API
+uses native M chunks with caller-owned workspace. See the
+[ROCm validation report](docs/ROCM_VALIDATION.md) for measured performance.
 
 See the [HIP documentation](csrc/hip/README.md) for R9700 benchmark results
 and kernel implementation details.

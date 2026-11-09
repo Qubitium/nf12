@@ -2,8 +2,8 @@
  * NF12 RDNA4 (HIP) public C API.
  *
  * The HIP port implements the codec and the fused linear routes of nf12.h, but
- * takes hipStream_t and returns hipError_t. There is no CUDA-compatibility
- * layer, so include this header rather than nf12.h.
+ * takes hipStream_t and returns hipError_t. For the shared CUDA/HIP contract,
+ * use nf12.h with NF12_HIP defined; this header exposes native HIP entry points.
  *
  * Pointers refer to device memory. Weight descriptors and analysis outputs are
  * host-resident. No function allocates device memory and the library keeps no
@@ -61,7 +61,7 @@ hipError_t nf12_hip_linear_fused_bf16t(const uint8_t* packed, const void* x, voi
                                        int64_t n, int64_t k, int64_t m, const void* bias,
                                        hipStream_t stream);
 
-/* Matrix-core fused path for 17 <= m <= nf12_hip_wmma_max_m(). Returns 0 from
+/* Matrix-core fused path for 16 <= m <= nf12_hip_wmma_max_m(). Returns 0 from
  * nf12_hip_wmma_supported on devices without wmma-128b-insts (gfx1250), where
  * the caller should use decode-then-rocBLAS instead. */
 int nf12_hip_wmma_max_m(void);
