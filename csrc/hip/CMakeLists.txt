@@ -23,6 +23,7 @@ endif()
 set(NF12_HIP_ARCHS "gfx1200;gfx1201" CACHE STRING "AMD GPU targets to build for")
 
 add_library(nf12_hip SHARED
+  ../api.cpp
   ../status.cpp
   decode.hip
   encode.hip
@@ -31,8 +32,7 @@ add_library(nf12_hip SHARED
   fused_decode.hip
   embedding.hip
   pack_bf16t.hip
-  c_api.hip
-  c_api_moe.hip)
+  backend.hip)
 target_include_directories(nf12_hip
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include
   # ``torch/fused_decode.h`` is a plain POD header (no torch includes), shared
@@ -59,7 +59,7 @@ install(TARGETS nf12_hip LIBRARY DESTINATION nf12)
 target_compile_options(nf12_hip PRIVATE -O3 -Wall -Wextra)
 
 # The torch extension is the same csrc/torch/ops.cpp as the CUDA build. It
-# reaches the HIP kernels through the nf12_* compatibility layer in c_api.cpp,
+# reaches the HIP kernels through the shared nf12_* frontend in api.cpp and backend.hip,
 # so the op schema, dispatch and graph handling are not duplicated.
 if(NF12_BUILD_TORCH)
   find_package(Python COMPONENTS Interpreter REQUIRED)

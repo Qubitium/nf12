@@ -27,7 +27,7 @@ ROCm release numbers and HIP component versions are distinct;
 | `fused_decode.hip` | The `nf12::torch_detail::fused_decode` seam for `_fused_moe` at `T == 1` (gate/SiLU and down/combine in two launches), so the torch op layer and the C ABI are identical on both backends. |
 | `embedding.hip` | `nf12_hip_embedding` for int32/int64 ids (bit-exact vs CUDA). |
 | `pack_bf16t.hip` | BF16 → bf16t twin packing (bit-exact vs CUDA). |
-| `c_api.hip`, `c_api_moe.hip` | The `nf12_*` C API of `include/nf12/nf12.h` on top of these kernels, so `csrc/torch/ops.cpp` compiles unchanged. |
+| `backend.hip` | HIP launches and workspace policy behind the shared `csrc/api.cpp` frontend. |
 
 ## Build
 
@@ -108,7 +108,7 @@ that size (0 bytes means the chosen launch does not split K). An earlier
 revision cached a single process-wide pointer, which was neither per device nor
 per stream; do not reintroduce it.
 
-This mirrors the CUDA build exactly (`csrc/api.cu`, `run_linear`): the library
+This mirrors the CUDA build exactly (`csrc/api.cpp`, `run_linear`): the library
 owns no scratch, allocates nothing, and keeps no per-device or per-stream cache.
 Seven of the forty benchmark `shape × m` cells split K; a null or undersized
 buffer is rejected and `nf12_linear` returns `NF12_ERROR_INSUFFICIENT_WORKSPACE`,
@@ -140,11 +140,14 @@ fused kernel on every measured shape. `gfx1250` has no `wmma-128b-insts`;
 
 ## torch extension on ROCm
 
+See [the shared ABI design](../../docs/ABI_BACKENDS.md) for ownership and compatibility checks.
+
 `csrc/torch/ops.cpp` is the op schema, argument checking, workspace allocation
 and dispatch layer for the CUDA build. Instead of writing a second op layer for
 ROCm, the HIP build compiles **the same `ops.cpp`** and backs it with
-`c_api.hip` + `c_api_moe.hip`, which implement the `nf12_*` C API on top of the
-HIP kernels. `nf12/nf12.h` supplies HIP aliases for the handful of CUDA
+`csrc/api.cpp`, the same public C ABI frontend used by CUDA. Common validation,
+empty-input behavior, size arithmetic, and error semantics are implemented once;
+`backend.hip` supplies HIP device queries, workspace policy, and launches. `nf12/nf12.h` supplies HIP aliases for the handful of CUDA
 spellings the shared layer uses (`cudaStream_t`, `cudaError_t`,
 `cudaMemcpyAsync`, …), so there is one op implementation, not two.
 

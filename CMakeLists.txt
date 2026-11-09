@@ -137,7 +137,8 @@ file(GLOB_RECURSE NF12_KERNEL_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/*.cu")
 
 add_library(nf12 SHARED
-  csrc/api.cu
+  csrc/api.cpp
+  csrc/backend_cuda.cu
   csrc/status.cpp
   csrc/device_info.cu
   ${NF12_KERNEL_SOURCES})

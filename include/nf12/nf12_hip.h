@@ -75,7 +75,7 @@ int nf12_hip_wmma_supported_device(int64_t m, int device);
 /* Device scratch for the split-K reduction, owned by the caller. Returns 0 when
  * the launch chosen for (n, k, m) needs no scratch.
  *
- * This mirrors the CUDA build (csrc/api.cu, run_linear) exactly: the library
+ * This mirrors the CUDA build (csrc/api.cpp, run_linear) exactly: the library
  * owns no scratch, allocates nothing, and keeps no per-device or per-stream
  * cache. Size the buffer with this function using the SAME (n, k, m) passed to
  * the launch, and allocate it from the caller's own caching allocator -- on

@@ -85,6 +85,8 @@ the torch API decodes bounded slices and runs BF16 GEMMs; the raw C API
 uses native M chunks with caller-owned workspace. See the
 [ROCm validation report](docs/ROCM_VALIDATION.md) for measured performance.
 
+See the [shared ABI design](docs/ABI_BACKENDS.md) for the CUDA/HIP boundary.
+
 See the [HIP documentation](csrc/hip/README.md) for R9700 benchmark results
 and kernel implementation details.
 

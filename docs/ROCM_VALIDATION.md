@@ -9,10 +9,11 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 608 | 12 | 1 |
-| Shared API | RTX 4090 | 441 | 13 | 1 |
+| HIP + shared API | R9700 | 611 | 12 | 1 |
+| Shared API | RTX 4090 | 445 | 13 | 1 |
 
-Both runs use source-built native and torch libraries. The known CUDA MoE
+Both runs use the shared ABI frontend and source-built native and torch libraries,
+with two visible GPUs to exercise concurrent device/stream propagation. The known CUDA MoE
 reference-tolerance case tracked separately in PR #7 is explicitly deselected;
 these counts do not claim it passes. The CUDA-only format-header helper is
 skipped under ROCm; HIP codec/format tests run separately in the same suite.

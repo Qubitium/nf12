@@ -107,7 +107,7 @@ def lib():
         _VOID, _VOID, _VOID, _I64, _I64, _I64, _VOID, _VOID, _SIZE, _VOID,
     ]
     # The CUDA-named C ABI, so the ROCm status codes can be compared with the
-    # CUDA build's (csrc/api.cu) rather than only with the HIP-level ones.
+    # CUDA build's (csrc/api.cpp) rather than only with the HIP-level ones.
     lib.nf12_linear.restype = _INT
     lib.nf12_linear.argtypes = [
         _VOID, _I64, _I64, ctypes.POINTER(_Nf12Weight), _VOID, _VOID, _I64,
@@ -348,7 +348,7 @@ def test_wmma_split_k_requires_workspace(lib):
     Regression for the process-wide ``g_partial`` pointer: two concurrent
     streams used to share one partial plane and corrupt each other, so the
     library never allocates this itself and a null or short buffer is rejected
-    rather than aliased. ``csrc/api.cu`` (``run_linear``) has the same contract.
+    rather than aliased. ``csrc/api.cpp`` (``run_linear``) has the same contract.
     """
     n, k, m = 1024, 4096, 64
     assert lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m) > 0
@@ -369,7 +369,7 @@ def test_wmma_split_k_requires_workspace(lib):
 def test_c_abi_workspace_status_matches_cuda(lib):
     """``nf12_linear`` must return the CUDA build's status for a missing buffer.
 
-    ``csrc/api.cu`` (``run_linear``) returns NF12_ERROR_INSUFFICIENT_WORKSPACE
+    ``csrc/api.cpp`` (``run_linear``) returns NF12_ERROR_INSUFFICIENT_WORKSPACE
     when the buffer is too small, and NF12_ERROR_INVALID_ARGUMENT only for a
     malformed call (a non-zero byte count with no pointer, or a misaligned one).
     A caller ported from CUDA switches on these values, so the ROCm build has to
@@ -400,7 +400,7 @@ def test_c_abi_workspace_status_matches_cuda(lib):
 def test_c_abi_validates_like_cuda(lib):
     """The C ABI must reject bad arguments instead of crashing or truncating.
 
-    Regressions for four defects against csrc/api.cu: a null weight segfaulted
+    Regressions for four defects against csrc/api.cpp: a null weight segfaulted
     in ``nf12_decode``; a null output returned NF12_OK and faulted
     asynchronously in ``nf12_decode``/``nf12_moe_combine``/``nf12_moe_silu_mul``;
     ``m == 0`` reported INVALID_ARGUMENT where CUDA returns NF12_OK; and a ``k``
