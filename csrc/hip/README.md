@@ -101,6 +101,15 @@ hipError_t nf12_hip_selftest(uint32_t* out, hipStream_t stream);
 `analyze` and `encode` synchronize the supplied stream and cannot be graph
 captured, matching the CUDA contract.
 
+Inference supports HIP graph capture/replay through both the torch API and
+native entry points. Load/JIT, encode weights, and warm up the chosen route
+before capture. Native callers must retain the captured input/output addresses
+and workspace until the graph is released; concurrent graphs need independent
+writable buffers. Torch manages its captured scratch through the graph allocator.
+See [graph validation](../../docs/ROCM_VALIDATION.md#inference-graph-capture)
+for the tested routes and replay counts. Encoding/packing is outside the
+inference graph requirement.
+
 The library holds no mutable device state. The split-K reduction scratch for
 `nf12_hip_linear_wmma` is owned by the caller: query
 `nf12_hip_linear_wmma_workspace_bytes(n, k, m)` and pass a buffer of at least

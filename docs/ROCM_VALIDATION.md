@@ -127,6 +127,44 @@ timing differences below are measurements, not claims of kernel speedups.
 | decode | E=4, N=256, K=512 | 3.556 | 3.575 | 4.434 | 4.450 |
 | grouped_operands | assignments=512, E=4, K=4096 | 3.275 | 3.295 | 14.398 | 14.131 |
 
+## Inference graph capture
+
+The inference audit on `8f31489` found no capture blocker on R9700. Explicit
+host synchronization is confined to encoding; inference launchers allocate no
+device scratch internally. Encoding and packing are outside this requirement.
+JIT/loading, weight preparation and route warmup happen before capture.
+
+With GIL disabled and two R9700s, changed-input replay covered decode, embedding,
+small-M and WMMA linear, BF16t twins, large-M decode/GEMM, MoE alignment,
+routed linear, activation/combine, and single-token/composed fused MoE.
+The targeted graph suite passed **32 tests, 1 skipped, 233 deselected in 6.00 s**;
+the skipped CUDA grouped-GEMM route is unavailable on RDNA4.
+
+| Replay check | Graphs | Replays | Incorrect outputs / changed guards |
+| --- | ---: | ---: | ---: |
+| Native small-M, split-K and chunked dense/BF16t | 8 | 40 | 0 |
+| Native decode, BF16t unpack and selftest | 1 | 5 | 0 |
+| Native grouped operands, with/without gather | 2 | 10 | 0 |
+| Inference families, changed activations/routing on two devices | 2 | 20 | 0 |
+| Concurrent graphs, two streams per device | 4 | 400 | 0 |
+
+The last two rows checked 620 and 800 output tensors respectively, exactly
+against eager execution. Concurrent graphs used independent pools, outputs
+and scratch; these results do not permit concurrently replaying graphs that
+share writable buffers. Native callers retain captured pointers and workspace
+for the graph lifetime. Torch owns its captured allocations. Only gfx1201 was
+runtime-tested here; this is not coverage of every architecture/configuration.
+
+The eleven native regression cases are in `tests/hip/test_inference_graphs.py`;
+the existing shared API graph tests also cover a multi-slice decode/GEMM route.
+Reproduce the targeted suite with the ROCm environment above:
+
+```sh
+python -m pytest tests/hip/test_inference_graphs.py tests/api/test_torch.py \
+  tests/api/test_embedding.py tests/api/test_moe.py tests/api/test_decode_route.py \
+  -k graph -q
+```
+
 ## Large-batch fallback
 
 Baseline: PR #3 at `bacb6a1`, fixed 64-row slices. Revised code: the same
