@@ -520,6 +520,15 @@ falls to a third of its throughput. The staging is therefore load-bearing, and
 the exposed global latency in the K loop cannot be bought back by reordering —
 every attempt loses more to issue pressure or occupancy than it gains.
 
+A fourth variant — two packed-plane slots in flight, so the load for block
+`kb+2` is issued while `kb` is decoded (the "PGR2"-style prefetch depth) — was
+built for the one-tile launch, where the register budget allows it. It raises
+the *ratio* at `m = 8` and `m = 16` (1.167 → 1.250 and 1.056 → 1.121 at
+`4096×4096`) but it does so by slowing both kernels: nf12 +2.5% at `m = 8` and
++1.8% at `m = 16`, the twin +9.8% and +8.1%. A ratio that improves because the
+baseline regressed is not a win, so it was reverted. The load latency was
+already covered by the single slot; the second slot only cost registers.
+
 ### The floor: nf12 against its bf16t twin over the whole PR #3 grid
 
 Both columns run the *same* kernel, so this ratio is the honest measure of what
@@ -532,25 +541,24 @@ overhead term pulls every cell toward 1.0.
 
 | k × n | m=1 | m=8 | m=16 | m=32 | m=64 | m=128 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096×4096 | 1.073 | 1.167 | 1.056 | 1.080 | 1.113 | 1.095 |
-| 4096×14336 | 1.099 | 1.114 | 1.083 | 1.135 | 1.106 | 1.079 |
-| 14336×4096 | 1.095 | 1.033 | 1.032 | 1.122 | 1.158 | 1.102 |
-| 4096×28672 | 1.167 | 1.112 | 1.061 | 1.162 | 1.183 | 1.084 |
-| 5120×25600 | 1.164 | 1.081 | 1.076 | 1.170 | 1.194 | 1.070 |
-| 25600×5120 | 1.166 | 1.071 | 1.064 | 1.122 | 1.077 | 1.099 |
-| 8192×8192 | 1.137 | 1.087 | 1.109 | 1.164 | 1.164 | 1.094 |
-| 2048×8192 | 1.110 | 1.040 | 0.991 | 1.092 | 1.115 | 1.135 |
-| 896×4864 | 1.019 | 1.002 | 0.998 | 1.071 | 1.101 | 1.074 |
+| 4096×4096 | 1.068 | 1.167 | 1.056 | 1.082 | 1.113 | 1.095 |
+| 4096×14336 | 1.132 | 1.112 | 1.094 | 1.137 | 1.111 | 1.080 |
+| 14336×4096 | 1.095 | 1.029 | 1.029 | 1.128 | 1.158 | 1.100 |
+| 4096×28672 | 1.167 | 1.109 | 1.115 | 1.155 | 1.184 | 1.088 |
+| 5120×25600 | 1.167 | 1.081 | 1.053 | 1.171 | 1.194 | 1.077 |
+| 25600×5120 | 1.168 | 1.069 | 1.059 | 1.127 | 1.074 | 1.100 |
+| 8192×8192 | 1.138 | 1.096 | 1.097 | 1.150 | 1.171 | 1.094 |
+| 2048×8192 | 1.105 | 1.037 | 1.001 | 1.096 | 1.115 | 1.117 |
+| 896×4864 | 1.019 | 1.002 | 1.007 | 1.096 | 1.099 | 1.077 |
 
-Fifty-two of fifty-four cells are at or above parity and the peak is 1.194.
-The two that sit on the line are both `m = 16` on the two smallest weights, and
-they are a genuine tie rather than a regression: at `m = 16` the CTA holds one
-token tile, so a decoded super-atom feeds only four MFMAs and the decode
-latency is the same order as the bytes it saves. `2048×8192` moves 33.6 MB
-against the twin's 41.9 MB, so the 25% byte advantage and the decode cost
-cancel to within a percent. It is also the band with the most run-to-run
-movement (±1%), so those two cells measure between 0.99 and 1.00 from run to
-run.
+All fifty-four cells are at or above parity; the minimum is 1.001 and the peak
+1.194. The cell on the line is `m = 16` on `2048×8192`, and it is a genuine tie
+rather than a regression: at `m = 16` the CTA holds one token tile, so a decoded
+super-atom feeds only four MFMAs and the decode cost is the same order as the
+bytes it saves. That shape moves 33.6 MB against the twin's 41.9 MB, so the 25%
+byte advantage and the decode cancel to within a percent. It is also the band
+with the most run-to-run movement (±1%), which is why this table is the median
+of three full-grid runs rather than a single run.
 
 Two changes took the floor cells up to parity, both trait- and shape-based
 rather than arch-based:
