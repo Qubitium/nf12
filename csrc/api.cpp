@@ -5,25 +5,15 @@
 #include <limits>
 
 #include "abi_runtime.h"
+#include "validation.h"
 #include "nf12/nf12.h"
 
 namespace {
 
 using nf12::abi::from_runtime;
 using nf12::abi::from_codec;
+using namespace nf12::validation;
 constexpr uint32_t kMaxExpBase = 120;
-
-bool aligned16(const void* p) { return (reinterpret_cast<uintptr_t>(p) & 15u) == 0; }
-
-// Bound intermediate byte counts to int64.
-bool valid_shape(int64_t n, int64_t k) {
-  return n > 0 && k > 0 && n % 16 == 0 && k % 64 == 0 && n <= std::numeric_limits<int64_t>::max() / 4 / k;
-}
-
-// A row-major BF16 matrix the kernels read or write with 16-byte vectors.
-bool valid_bf16_matrix(const void* p, int64_t cols, int64_t ld) {
-  return p != nullptr && aligned16(p) && ld >= cols && ld % 8 == 0;
-}
 
 bool valid_weight(const nf12_weight_t* w) {
   return w != nullptr && valid_shape(w->n, w->k) && w->packed != nullptr && aligned16(w->packed) &&
@@ -72,13 +62,6 @@ nf12_status_t run_linear(const void* x, int64_t m, int64_t ldx, nf12::backend::W
   args.stream = stream;
   args.device = device;
   return from_runtime(nf12::backend::linear(args));
-}
-
-bool aligned(const void* p, uintptr_t bytes) { return (reinterpret_cast<uintptr_t>(p) & (bytes - 1)) == 0; }
-
-// The larger bf16t layout must fit in int64 across all experts.
-bool valid_moe_shape(int64_t num_experts, int64_t n, int64_t k) {
-  return num_experts >= 1 && valid_shape(n, k) && num_experts <= std::numeric_limits<int64_t>::max() / 2 / n / k;
 }
 
 bool valid_moe_weight(const nf12_moe_weight_t* w) {
