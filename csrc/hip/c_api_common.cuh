@@ -33,19 +33,17 @@ inline thread_local hipError_t t_last_error = hipSuccess;
 // failure as NF12_ERROR_CUDA, and the explicit workspace-size checks below are
 // what produce INSUFFICIENT_WORKSPACE on both backends.
 inline nf12_status_t status(hipError_t err) {
-  if (err != hipSuccess) t_last_error = err;
-  switch (err) {
-    case hipSuccess:
-      return NF12_OK;
-    case hipErrorInvalidValue:
-    case hipErrorInvalidDevice:
-      return NF12_ERROR_INVALID_ARGUMENT;
-    case hipErrorNotSupported:
-    case hipErrorNoBinaryForGpu:
-      return NF12_ERROR_UNSUPPORTED;
-    default:
-      return NF12_ERROR_CUDA;
+  if (err == hipSuccess) return NF12_OK;
+  // Native HIP entry points also report validation errors this way. Like
+  // CUDA's from_codec(), these must not overwrite the last runtime error.
+  if (err == hipErrorInvalidValue || err == hipErrorInvalidDevice) {
+    return NF12_ERROR_INVALID_ARGUMENT;
   }
+  t_last_error = err;
+  if (err == hipErrorNotSupported || err == hipErrorNoBinaryForGpu) {
+    return NF12_ERROR_UNSUPPORTED;
+  }
+  return NF12_ERROR_CUDA;
 }
 
 inline bool valid_device(int device) {

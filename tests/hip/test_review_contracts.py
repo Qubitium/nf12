@@ -224,6 +224,7 @@ int main() {
   assert(status(hipErrorNoBinaryForGpu) == NF12_ERROR_UNSUPPORTED);
   assert(status(hipErrorOutOfMemory) == NF12_ERROR_CUDA);
   assert(status(hipSuccess) == NF12_OK);
+  assert(status(hipErrorInvalidValue) == NF12_ERROR_INVALID_ARGUMENT);
   assert(t_last_error == hipErrorOutOfMemory);
   std::thread other([] {
     assert(t_last_error == hipSuccess);
