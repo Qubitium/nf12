@@ -15,6 +15,8 @@
 #include "nf12/nf12.h"
 #include "nf12/nf12_hip.h"
 
+#include <algorithm>
+
 namespace nf12_hip {
 hipError_t pack_bf16t(const void* w, int64_t n, int64_t k, int64_t ldw, uint8_t* out,
                       hipStream_t stream);
@@ -107,8 +109,11 @@ nf12_status_t nf12_decode(const nf12_weight_t* w, void* out_bf16, int64_t ldo, c
 }
 
 size_t nf12_linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int) {
-  if (m <= 0 || !valid_shape(n, k) || m > nf12_hip_wmma_max_m()) return 0;
-  return nf12_hip_linear_wmma_workspace_bytes(n, k, m);
+  if (m <= 0 || !valid_shape(n, k)) return 0;
+  // Above the matrix-core M cap the launch is a sequence of chunk-sized
+  // launches, so only the largest chunk needs a partial plane.
+  const int64_t chunk = m < nf12_hip_wmma_max_m() ? m : nf12_hip_wmma_max_m();
+  return nf12_hip_linear_wmma_workspace_bytes(n, k, chunk);
 }
 
 nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w,
@@ -129,7 +134,7 @@ nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12
   // they cannot honour a wider leading dimension. Reject rather than compute the
   // wrong rows.
   if (ldx != w->k || ldy != w->n) return NF12_ERROR_INVALID_ARGUMENT;
-  if (workspace_bytes < nf12_hip_linear_wmma_workspace_bytes(w->n, w->k, m)) {
+  if (workspace_bytes < nf12_linear_workspace_bytes(m, w->n, w->k, 0)) {
     return NF12_ERROR_INSUFFICIENT_WORKSPACE;
   }
   if (m < 16) {
@@ -138,20 +143,42 @@ nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12
                                         w->exp_base, x_bf16, y_bf16, w->n, w->k, m, bias_bf16,
                                         stream));
   }
-  if (m <= nf12_hip_wmma_max_m()) {
-    return status(nf12_hip_linear_wmma(static_cast<const uint8_t*>(w->packed),
-                                       static_cast<const uint4*>(w->escapes),
-                                       w->exp_base, x_bf16, y_bf16, w->n, w->k, m, bias_bf16,
-                                       workspace, workspace_bytes, stream));
+  // Above the matrix-core M cap the CUDA build decodes row slices and runs its
+  // own GEMM. HIP has no in-library GEMM, so the same contract is met by
+  // walking the output in WMMA-sized M chunks: each chunk re-reads the packed
+  // weight, exactly as a slice of the CUDA route re-reads its slice. The last
+  // chunk may be shorter than 16 rows and uses the fused small-M kernel.
+  const int64_t chunk = nf12_hip_wmma_max_m();
+  for (int64_t m0 = 0; m0 < m; ) {
+    const int64_t rows = std::min(chunk, m - m0);
+    const auto* xs = static_cast<const uint8_t*>(x_bf16) + m0 * w->k * 2;
+    auto* ys = static_cast<uint8_t*>(y_bf16) + m0 * w->n * 2;
+    const nf12_status_t rc =
+        rows < 16
+            ? status(nf12_hip_linear_fused(static_cast<const uint8_t*>(w->packed),
+                                           static_cast<const uint4*>(w->escapes), w->exp_base,
+                                           xs, ys, w->n, w->k, rows, bias_bf16, stream))
+            : status(nf12_hip_linear_wmma(static_cast<const uint8_t*>(w->packed),
+                                          static_cast<const uint4*>(w->escapes), w->exp_base, xs,
+                                          ys, w->n, w->k, rows, bias_bf16, workspace,
+                                          workspace_bytes, stream));
+    if (rc != NF12_OK) return rc;
+    m0 += rows;
   }
-  return NF12_ERROR_UNSUPPORTED;
+  return NF12_OK;
 }
 
 // Above the matrix-core crossover ops.cpp decodes slices and calls torch's
 // GEMM, so no HIP GEMM is needed here.
-int64_t nf12_linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, int) {
+int64_t nf12_linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, int device) {
   if (m <= 0 || m > std::numeric_limits<int32_t>::max() || !valid_shape(n, k)) return 0;
-  return m > nf12_hip_wmma_max_m() ? 64 : 0;
+  // The fused small-M route runs on every supported arch.
+  if (m < 16) return 0;
+  // The matrix-core route needs wmma-128b-insts. Without it (gfx1250) the op
+  // layer must decode and call torch's GEMM instead of launching an empty
+  // kernel.
+  if (m <= nf12_hip_wmma_max_m() && nf12_hip_wmma_supported_device(m, device)) return 0;
+  return 64;
 }
 
 nf12_status_t nf12_pack_bf16t(const void* w, int64_t n, int64_t k, int64_t ldw, void* out,
@@ -166,23 +193,35 @@ nf12_status_t nf12_linear_bf16t(const void* x_bf16, int64_t m, int64_t ldx, cons
                                 int64_t n, int64_t k, const void* bias_bf16, void* y_bf16,
                                 int64_t ldy, void* workspace, size_t workspace_bytes,
                                 cudaStream_t stream) {
-  if (!valid_shape(n, k) || w_bf16t == nullptr || !aligned16(w_bf16t) || m < 0) {
+  if (!valid_shape(n, k) || w_bf16t == nullptr || !aligned16(w_bf16t) || m < 0 ||
+      !valid_workspace(workspace, workspace_bytes)) {
     return NF12_ERROR_INVALID_ARGUMENT;
   }
-  // No workspace check here: the HIP twin always runs one K pass and needs no
-  // scratch, so requiring the nf12 route's buffer would reject a valid call.
   if (m == 0) return NF12_OK;
   if (!valid_bf16_matrix(x_bf16, k, ldx) || !valid_bf16_matrix(y_bf16, n, ldy)) {
     return NF12_ERROR_INVALID_ARGUMENT;
   }
   if (ldx != k || ldy != n) return NF12_ERROR_INVALID_ARGUMENT;
-  const uint8_t* const packed = static_cast<const uint8_t*>(w_bf16t);
-  if (m < 16) {
-    return status(
-        nf12_hip_linear_fused_bf16t(packed, x_bf16, y_bf16, n, k, m, bias_bf16, stream));
+  // The twin runs the same (tiles, splits) plan as the nf12 route so the two
+  // are bitwise comparable, and that plan needs the split-K partial plane.
+  if (workspace_bytes < nf12_linear_workspace_bytes(m, n, k, 0)) {
+    return NF12_ERROR_INSUFFICIENT_WORKSPACE;
   }
-  return status(nf12_hip_linear_wmma_bf16t(packed, x_bf16, y_bf16, n, k, m, bias_bf16,
-                                           workspace, workspace_bytes, stream));
+  const uint8_t* const packed = static_cast<const uint8_t*>(w_bf16t);
+  const int64_t chunk = nf12_hip_wmma_max_m();
+  for (int64_t m0 = 0; m0 < m; ) {
+    const int64_t rows = std::min(chunk, m - m0);
+    const auto* xs = static_cast<const uint8_t*>(x_bf16) + m0 * k * 2;
+    auto* ys = static_cast<uint8_t*>(y_bf16) + m0 * n * 2;
+    const nf12_status_t rc =
+        rows < 16
+            ? status(nf12_hip_linear_fused_bf16t(packed, xs, ys, n, k, rows, bias_bf16, stream))
+            : status(nf12_hip_linear_wmma_bf16t(packed, xs, ys, n, k, rows, bias_bf16, workspace,
+                                                workspace_bytes, stream));
+    if (rc != NF12_OK) return rc;
+    m0 += rows;
+  }
+  return NF12_OK;
 }
 
 // The MoE C API lives in c_api_moe.hip: it is the same contract, but keeping it
