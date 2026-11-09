@@ -458,6 +458,64 @@ That trade — ratio or absolute speed — is why this route cannot reach 1.3×
 over `torch.matmul` at `m >= 16` without a stream-K style decomposition that
 bounds the partial plane by the CTA count instead of by `m*n*kSplits`.
 
+### Cross-check against `ROCm/aiter` and `ROCm/FlyDSL`
+
+The CDNA3 tiling was compared item by item against the gfx942 kernels in
+`ROCm/aiter` (`a0bae86`, `csrc/opus_gemm/`) and `ROCm/FlyDSL` (`affc0d4`). Six
+candidate ideas were examined; all six are rejected for this kernel, and the
+reasons are recorded here so the comparison is not repeated.
+
+1. **OPUS 4-phase / PGR2 scheduling** (hand-counted `s_waitcnt_vmcnt(N)` and
+   `s_waitcnt_lgkmcnt(N)`, 4–14 loads in flight, `ds_read_b128` interleaved with
+   MFMA). Not expressible here. The kernel already issues every fragment load
+   before the first MFMA, and the serialising fence is the one between
+   `decode_half`'s `ds_write` and the `bf` load: different lanes' stores feed
+   different lanes' loads, so it is a correctness fence and cannot be relaxed
+   by a wait-count hint. Measured barriers are ~1% of the call anyway.
+2. **`E_N = 2` register blocking** (halves the A-fragment LDS traffic, the
+   largest single measured cost at 18–23%). Rejected on registers: the built
+   kernel reports `vgpr_count = 122` for `mfma_tile_kernel<kNf12, 8, 8>` (bf16t
+   twin 104) with `agpr_count = 0`, i.e. the accumulators live in VGPRs, so a
+   second N tile (+32 accumulators, +8 fragment registers) is past the 128-VGPR
+   ceiling of a 512-thread CTA. Fitting it needs 256-thread CTAs, which halves
+   the waves per CU on a kernel that is already latency-bound.
+3. **XOR swizzle** (`Swizzle<3,3,3>`, `smem_x1b`). No gain by construction: a
+   16×64 BF16 tile has eight 16-byte chunks per row, so a chunk-granularity XOR
+   only permutes whole chunks and rows `r` and `r+8` still start on the same
+   bank. The fragment read is 16 rows × 4 lanes × 8 B = 512 B, which is four
+   cycles at the 128 B/cycle LDS floor — already bank-optimal for the bytes it
+   must move, and a swizzle cannot reduce bytes.
+4. **4-byte `raw_ptr_buffer_load_lds` staging** (gfx942 has no 12/16 B
+   LDS-destination buffer load; that is gfx950-only). Rejected: a 16-byte copy
+   becomes four instructions to remove a cost measured at 4.6% of the call, and
+   it does not remove the store→barrier dependency that actually costs the time.
+5. **WKC intra-CTA K split.** Rejected on shared memory: each of the eight waves
+   would need its own activation block, 8 × 18.4 KB = 147 KB at `kMt = 8`,
+   which exceeds the 160 KB opt-in limit once the decoded tiles are added. At
+   `kMt = 4` it fits but only removes the partial plane at `m <= 64`, the band
+   that is already at 1.15×.
+6. **OPUS auto split-K `min_iters` guard.** A no-op for this grid. `kSplits` is
+   already capped at `k_blocks`, and every cell of the PR #3 grid has
+   `k_blocks / kSplits >= 4` (64/16 at `m = 1`, 64/8 at `m = 128`, 224/2 at
+   `n = 14336`), so a "at least two K iterations per split" guard never binds.
+
+Three reorderings of the K loop were built and measured against the committed
+kernel (`n = k = 4096`, cold L2, graph timing, nf12 µs at `m = 16 / 64 / 128`):
+
+| variant | m=16 | m=64 | m=128 |
+| --- | ---: | ---: | ---: |
+| committed | 16.61 | 24.22 | 34.87 |
+| staging moved behind the fragment loads | 16.95 | 25.42 | 38.84 |
+| two-deep double-buffered staging | 17.07 | 25.00 | 38.99 |
+| A fragments read straight from `x` | 20.24 | 50.72 | 87.36 |
+
+The last row is the decisive one: dropping the shared staging entirely removes
+the barrier and the shared traffic, but each fragment load then becomes sixteen
+32-byte row transactions instead of one 512-byte wave read, and the kernel
+falls to a third of its throughput. The staging is therefore load-bearing, and
+the exposed global latency in the K loop cannot be bought back by reordering —
+every attempt loses more to issue pressure or occupancy than it gains.
+
 **MoE (MI300X, `mixtral-8x7b` E=8 topk=2, uniform routing):** `moe_linear` is
 1087 / 3241 / 11655 µs for `w13` and 585 / 1503 / 4997 µs for `w2` at
 `t = 64 / 256 / 1024` on the fused routed MFMA kernel, **1.01–1.08× faster than
