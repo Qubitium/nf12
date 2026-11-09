@@ -68,6 +68,8 @@ def main() -> None:
     args = ap.parse_args()
     torch.cuda.init()
     dev = torch.device(args.device)
+    # Raw HIP launches and timing events use the current device, not tensor.device.
+    torch.cuda.set_device(dev)
     import nf12
     lib = _bind(nf12.library_path())
     stream = torch.cuda.current_stream().cuda_stream
