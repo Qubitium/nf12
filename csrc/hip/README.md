@@ -201,21 +201,20 @@ thread-block clusters, PDL and the `small_m_core` bulk ring, none of which exist
 on RDNA4. The down kernel therefore keeps the whole top-k walk inside one CTA,
 which is what preserves the ordered reduction without atomics.
 
-Warm `T = 1`, `E = max(2, topk)`, distinct expert ids, median of 100 launches,
-against the composed `moe_*` route:
+Warm `T = 1`, `E = max(2, topk)`, distinct expert ids. R9700 gfx1201, 24 interleaved event samples per route after three warmups; medians include the composed path's zero-initialized assignment output:
 
 | K | I | n | topk | fused (µs) | composed (µs) | ratio |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096 | 14336 | 4096 | 2 | 842.8 | 945.2 | 1.12× |
-| 4096 | 14336 | 4096 | 1 | 428.3 | 491.8 | 1.15× |
-| 4096 | 14336 | 4096 | 4 | 1672.1 | 1800.2 | 1.08× |
-| 4096 | 4096 | 4096 | 2 | 253.7 | 288.7 | 1.14× |
-| 2048 | 8192 | 2048 | 2 | 248.0 | 307.5 | 1.24× |
-| 4096 | 1024 | 4096 | 2 | 38.5 | 97.5 | 2.53× |
-| 5120 | 25600 | 5120 | 2 | 1868.9 | 2029.8 | 1.09× |
-| 4096 | 7168 | 4096 | 2 | 427.8 | 463.3 | 1.08× |
+| 4096 | 14336 | 4096 | 2 | 848.1 | 935.8 | 1.10× |
+| 4096 | 14336 | 4096 | 1 | 430.9 | 488.8 | 1.13× |
+| 4096 | 14336 | 4096 | 4 | 1676.6 | 1806.7 | 1.08× |
+| 4096 | 4096 | 4096 | 2 | 310.6 | 356.5 | 1.15× |
+| 2048 | 8192 | 2048 | 2 | 253.7 | 320.0 | 1.26× |
+| 4096 | 1024 | 4096 | 2 | 37.2 | 111.5 | 3.00× |
+| 5120 | 25600 | 5120 | 2 | 1875.8 | 2037.8 | 1.09× |
+| 4096 | 7168 | 4096 | 2 | 431.3 | 474.2 | 1.10× |
 
-The fused route is faster at every shape measured (1.08× to 2.53×): it drops
+The fused route is faster at every shape measured (1.08× to 3.00×): it drops
 `moe_align`, `moe_silu_mul` and `moe_combine` plus the two intermediate BF16
 round-trips. It is *not* bit-identical to the composed route -- the K walk has a
 different FP32 association order, exactly like the CUDA fused kernel -- so

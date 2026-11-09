@@ -9,13 +9,13 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 600 | 12 | 1 |
-| Shared API | RTX 4090 | 545 | 16 | 1 |
+| HIP + shared API | R9700 | 634 | 12 | 1 |
+| Shared API | RTX 4090 | 553 | 16 | 1 |
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
 with two visible GPUs to exercise concurrent device/stream propagation. The
 backend-neutral cases live in `tests/api` and run on either runtime; `tests/hip`
-holds the 51 native `nf12_hip_*`, RDNA4 dispatch and HIP graph cases that have no
+holds native `nf12_hip_*`, RDNA4 dispatch and HIP graph cases that have no
 CUDA counterpart. The 4 extra CUDA skips are decode-slice tests whose device
 selects the fused route instead. The known CUDA MoE
 reference-tolerance case tracked separately in PR #7 is explicitly deselected;
@@ -40,6 +40,13 @@ BF16 only for the separate accumulation-order comparison. The C99 consumer runs 
 shared exported API. Status strings come from one shared `csrc/status.cpp`;
 runtime error state is thread-local and survives successful/validation calls.
 CMake uses `hip::host` for runtime headers, including LLVM-subdirectory compiler paths.
+The native HIP codec and linear entry points now share the C ABI's buffer,
+alignment, stride and workspace checks; 26 negative calls return
+`hipErrorInvalidValue` before a GPU launch. A default source build selects HIP
+when the installed PyTorch wheel uses ROCm, even with `nvcc` available; an
+explicit `NF12_ENABLE_HIP=OFF` fails at configure time. The composed fused-MoE
+route zero-initializes the final assignment buffer before combining dropped
+slots, including when its torch op is called directly with `zero_fill=False`.
 
 ### Independent review follow-up
 
