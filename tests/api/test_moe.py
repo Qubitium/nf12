@@ -718,7 +718,11 @@ def test_c_align_validation(lib):
     ids = torch.zeros(4, 2, dtype=torch.int32, device=DEV)
     out = torch.empty(8, dtype=torch.int32, device=DEV)
     off = torch.full((5,), -7, dtype=torch.int64, device=DEV)
-    a = (ids.data_ptr(), 4, 2, 4, out.data_ptr(), off.data_ptr(), None, 0, stream())
+    # Workspace sizes are backend-dependent; consumers use the public query.
+    small_need = lib.nf12_moe_align_workspace_bytes(4, 2, 4)
+    small_ws = torch.empty(small_need, dtype=torch.uint8, device=DEV)
+    a = (ids.data_ptr(), 4, 2, 4, out.data_ptr(), off.data_ptr(),
+         small_ws.data_ptr() if small_need else None, small_need, stream())
     assert lib.nf12_moe_align(*a) == OK
     assert lib.nf12_moe_align(a[0], 4, 0, 4, *a[4:]) == INVALID  # topk < 1
     assert lib.nf12_moe_align(a[0], 4, 2, 0, *a[4:]) == INVALID  # E < 1
@@ -734,7 +738,9 @@ def test_c_align_validation(lib):
     assert off.tolist() == [0] * 5
     # Multi-block sizes need workspace.
     need = lib.nf12_moe_align_workspace_bytes(4096, 8, 128)
-    assert need > 0 and lib.nf12_moe_align_workspace_bytes(1, 8, 128) == 0
+    assert need > 0
+    if torch.version.hip is None:  # CUDA has a workspace-free small routing kernel.
+        assert lib.nf12_moe_align_workspace_bytes(1, 8, 128) == 0
     big = torch.zeros(4096, 8, dtype=torch.int32, device=DEV)
     big_out = torch.empty(4096 * 8, dtype=torch.int32, device=DEV)
     big_off = torch.empty(129, dtype=torch.int64, device=DEV)
