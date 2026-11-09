@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Fail before HIP test collection on unsupported ROCm/PyTorch runtimes."""
+"""Gate every suite before collection on unsupported ROCm/PyTorch runtimes."""
 
 from __future__ import annotations
 

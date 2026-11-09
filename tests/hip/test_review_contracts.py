@@ -21,21 +21,6 @@ class MoeWeight(C.Structure):
                 ("experts", C.c_int64), ("n", C.c_int64), ("k", C.c_int64)]
 
 
-@pytest.mark.parametrize("magnitude,bias_value", [(2.**25, 1.), (1., 2.**-25), (2.**127, 2.**127)])
-def test_split_k_bias_follows_complete_reduction(abi, magnitude, bias_value):
-    m, n, k = 16, 16, 512
-    assert abi.nf12_hip_linear_wmma_workspace_bytes(n, k, m) > 0
-    w = torch.zeros((n, k), device="cuda", dtype=torch.bfloat16)
-    w[:, 0], w[:, 64] = magnitude, -magnitude
-    x = torch.ones((m, k), device="cuda", dtype=torch.bfloat16)
-    bias = torch.full((n,), bias_value, device="cuda", dtype=torch.bfloat16)
-    # The two nonzero products cancel exactly. Bias must survive unchanged,
-    # including when adding it to an unreduced partial would overflow FP32.
-    expected = bias.expand(m, n).contiguous()
-    for linear, weight in ((nf12.linear, nf12.encode(w)), (nf12.linear_bf16t, nf12.pack_bf16t(w))):
-        out = linear(x, weight, bias)
-        assert bool(out.isfinite().all())
-        assert torch.equal(out.view(torch.int16), expected.view(torch.int16))
 
 
 @pytest.fixture
@@ -107,7 +92,6 @@ def test_moe_decode_grid_overflow_matches_cuda_status(abi):
     bases = torch.zeros(experts, device="cuda", dtype=torch.uint8)
     out = torch.full((experts, n, k), -7., device="cuda", dtype=torch.bfloat16)
     cw = MoeWeight(packed.data_ptr(), None, offsets.data_ptr(), bases.data_ptr(), experts, n, k)
-    assert abi.nf12_moe_decode(C.byref(cw), None, 0, 0, n, out.data_ptr(), k, _stream()) == 1
     assert abi.nf12_hip_moe_decode(cw.packed, cw.escapes, cw.escape_offsets, cw.exp_base,
                                  experts, n, k, None, 0, 0, n, out.data_ptr(), k, _stream()) == 1
     torch.cuda.synchronize()
@@ -129,8 +113,6 @@ def test_native_moe_decode_rejects_invalid_slice_or_stride(abi, row0, rows, ldo)
     out = torch.full((34, 80), -7., device="cuda", dtype=torch.bfloat16)
     cw = MoeWeight(nw.packed.data_ptr(), nw.escapes.data_ptr(), ends.data_ptr(),
                    base.data_ptr(), 1, 16, 64)
-    assert abi.nf12_moe_decode(C.byref(cw), None, 0, row0, rows,
-                               out[1:].data_ptr(), ldo, _stream()) == 1
     assert abi.nf12_hip_moe_decode(cw.packed, cw.escapes, cw.escape_offsets, cw.exp_base,
                                    1, 16, 64, None, 0, row0, rows,
                                    out[1:].data_ptr(), ldo, _stream()) == 1
@@ -227,42 +209,6 @@ def test_moe_wmma_grid_y_boundary(abi, count):
         stream.synchronize()
 
 
-@pytest.mark.parametrize("offsets", [
-    [-1, 1], [0, 3, 1, 4], [3, 1, 2, 4], [-9, -4, 2, 99],
-    [2**63 - 1, -(2**63), 0, 4],
-])
-def test_moe_offsets_are_clamped_and_monotone(abi, offsets):
-    e, n, k, count = len(offsets) - 1, 16, 64, 4
-    w = torch.stack([torch.full((n, k), j + 1., device="cuda", dtype=torch.bfloat16)
-                     for j in range(e)])
-    nw = nf12.encode_moe(w)
-    cw = MoeWeight(nw.packed.data_ptr(), nw.escapes.data_ptr(), nw.escape_offsets.data_ptr(),
-                   nw.exp_base.data_ptr(), e, n, k)
-    raw = torch.tensor(offsets, device="cuda", dtype=torch.int64)
-    normalized = raw.clamp(0, count).cummax(0).values
-    x = torch.ones((count + 2, k), device="cuda", dtype=torch.bfloat16)
-    need = abi.nf12_moe_linear_workspace_bytes(count, e, n, k, torch.cuda.current_device())
-    ws = torch.empty(max(1, need), device="cuda", dtype=torch.uint8)
-    results = []
-    for off in (raw, normalized):
-        # Guard both sides of the output and leave unassigned rows untouched.
-        out = torch.full((count + 2, n), -7., device="cuda", dtype=torch.bfloat16)
-        rc = abi.nf12_moe_linear(x[1:].data_ptr(), k, None, 1, None, off.data_ptr(), count,
-                                C.byref(cw), None, out[1:].data_ptr(), n,
-                                ws.data_ptr(), need, _stream())
-        assert rc == 0
-        decoded = torch.full((e, n, k), -7., device="cuda", dtype=torch.bfloat16)
-        assert abi.nf12_moe_decode(C.byref(cw), off.data_ptr(), count, 0, n,
-                                  decoded.data_ptr(), k, _stream()) == 0
-        ends = torch.empty(e, device="cuda", dtype=torch.int32)
-        assert abi.nf12_moe_grouped_operands(None, k, None, 1, off.data_ptr(), count, e, k,
-                                           None, k, ends.data_ptr(), _stream()) == 0
-        torch.cuda.synchronize()
-        assert bool((out[[0, -1]] == -7).all())
-        assert torch.equal(ends, normalized[1:].int())
-        results.append((out, decoded))
-    for raw_result, norm_result in zip(*results):
-        assert torch.equal(raw_result.view(torch.int16), norm_result.view(torch.int16))
 
 
 @pytest.mark.parametrize("m", [257, 272, 288, 320, 528])
@@ -288,108 +234,3 @@ def test_chunk_workspace_covers_tail_plan(abi, m):
     assert bool((ws[need:] == 0xA5).all())
     assert bool((out == k).all())
     assert torch.equal(out.view(torch.int16), twin_out.view(torch.int16))
-
-
-@pytest.mark.parametrize("experts,topk", [(1, 1), (4, 2), (20000, 8)])
-def test_empty_moe_align_needs_no_workspace(abi, experts, topk):
-    ids = torch.empty((0, topk), device="cuda", dtype=torch.int32)
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        sorted_ids, offsets = nf12.moe_align(ids, experts)
-    stream.synchronize()
-    assert sorted_ids.shape == (0,)
-    assert offsets.shape == (experts + 1,)
-    assert bool((offsets == 0).all())
-
-
-@pytest.mark.parametrize("m", [0, 1, 16])
-def test_bf16t_rejects_misaligned_bias_before_writing(abi, m):
-    n, k = 16, 64
-    w = torch.ones((n, k), device="cuda", dtype=torch.bfloat16)
-    twin = nf12.pack_bf16t(w)
-    x = torch.ones((max(m, 1), k), device="cuda", dtype=torch.bfloat16)
-    out = torch.full((max(m, 1), n), -7., device="cuda", dtype=torch.bfloat16)
-    bias = torch.zeros(n + 8, device="cuda", dtype=torch.bfloat16)[1:1 + n]
-    assert abi.nf12_linear_bf16t(x.data_ptr(), m, k, twin.data_ptr(), n, k,
-                                bias.data_ptr(), out.data_ptr(), n, None, 0, _stream()) == 1
-    assert bool((out == -7).all())
-
-
-@pytest.mark.parametrize("m", [1, 15, 16, 17, 64, 128, 256, 257, 272])
-def test_padded_linear_strides_preserve_guard_columns(abi, m):
-    n, k = 256, 512
-    generator = torch.Generator(device="cuda").manual_seed(m)
-    w = (torch.randn(n, k, device="cuda", generator=generator) * .02).bfloat16()
-    nw, twin = nf12.encode(w), nf12.pack_bf16t(w)
-    cw = _Nf12Weight(nw.packed.data_ptr(), nw.escapes.data_ptr(), nw.num_escapes, n, k, nw.exp_base)
-    xpad = (torch.randn(m, k + 8, device="cuda", generator=generator) * .05).bfloat16()
-    x = xpad[:, :k]
-    dense_x = x.contiguous()
-    bias = (torch.randn(n, device="cuda", generator=generator) * .01).bfloat16()
-    need = abi.nf12_linear_workspace_bytes(m, n, k, torch.cuda.current_device())
-    ws = torch.empty(max(1, need), device="cuda", dtype=torch.uint8)
-    expected = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
-    assert abi.nf12_linear(dense_x.data_ptr(), m, k, C.byref(cw), bias.data_ptr(),
-                           expected.data_ptr(), n, ws.data_ptr(), need, _stream()) == 0
-    for bf16t in (False, True):
-        guarded = torch.full((m + 2, n + 8), -7., device="cuda", dtype=torch.bfloat16)
-        out = guarded[1:-1, :n]
-        if bf16t:
-            rc = abi.nf12_linear_bf16t(x.data_ptr(), m, x.stride(0), twin.data_ptr(), n, k,
-                                       bias.data_ptr(), out.data_ptr(), out.stride(0),
-                                       ws.data_ptr(), need, _stream())
-        else:
-            rc = abi.nf12_linear(x.data_ptr(), m, x.stride(0), C.byref(cw), bias.data_ptr(),
-                                 out.data_ptr(), out.stride(0), ws.data_ptr(), need, _stream())
-        assert rc == 0
-        torch.cuda.synchronize()
-        assert bool((guarded[[0, -1]] == -7).all())
-        assert bool((guarded[:, n:] == -7).all())
-        assert torch.equal(out.contiguous().view(torch.int16), expected.view(torch.int16))
-
-
-@pytest.mark.parametrize("n,k", [(4096, 4096), (14336, 4096), (65536, 4096), (65552, 4096)])
-def test_decode_slice_budget(abi, n, k):
-    rows = abi.nf12_linear_decode_gemm_rows(512, n, k, torch.cuda.current_device())
-    assert rows % 16 == 0 and 16 <= rows <= n
-    assert rows * k * 2 <= 256 * 1024 * 1024
-    if n * k * 2 <= 256 * 1024 * 1024:
-        assert rows == n
-
-
-@pytest.mark.parametrize("m,n,k", [(257, 4096, 4096), (512, 4096, 4096), (257, 65552, 2048)])
-def test_decode_slices_match_bf16_gemm(abi, m, n, k):
-    generator = torch.Generator(device="cuda").manual_seed(11)
-    w = (torch.randn(n, k, device="cuda", generator=generator) * .02).bfloat16()
-    x = (torch.randn(m, k, device="cuda", generator=generator) * .05).bfloat16()
-    bias = (torch.randn(n, device="cuda", generator=generator) * .01).bfloat16()
-    nw = nf12.encode(w)
-    rows = abi.nf12_linear_decode_gemm_rows(m, n, k, torch.cuda.current_device())
-    expected = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
-    for start in range(0, n, rows):
-        end = min(start + rows, n)
-        torch.addmm(bias[start:end], x, w[start:end].t(), out=expected[:, start:end])
-    out = nf12.linear(x, nw, bias)
-    assert torch.equal(out.view(torch.int16), expected.view(torch.int16))
-
-
-def test_moe_decode_accepts_large_grid_x(abi):
-    n, k = 524288, 64  # 32768 blocks exceeds the old mistaken 15-bit cap.
-    w = torch.ones((1, n, k), dtype=torch.bfloat16, device="cuda")
-    nw = nf12.encode_moe(w)
-    cw = MoeWeight(nw.packed.data_ptr(), nw.escapes.data_ptr(), nw.escape_offsets.data_ptr(),
-                   nw.exp_base.data_ptr(), 1, n, k)
-    offsets = torch.tensor([0, 1], dtype=torch.int64, device="cuda")
-    out = torch.empty_like(w)
-    assert abi.nf12_moe_decode(C.byref(cw), offsets.data_ptr(), 1, 0, n,
-                              out.data_ptr(), k, _stream()) == 0
-    assert torch.equal(w.view(torch.int16), out.view(torch.int16))
-
-
-def test_moe_invalid_expert_count_and_empty_topk(abi):
-    abi.nf12_moe_align_workspace_bytes.argtypes = [C.c_int64] * 3
-    abi.nf12_moe_align_workspace_bytes.restype = C.c_size_t
-    assert abi.nf12_moe_align_workspace_bytes(1, 1, 2**31) == 0
-    abi.nf12_moe_combine.argtypes = [C.c_void_p] + [C.c_int64] * 4 + [C.c_void_p, C.c_int64, C.c_void_p]
-    abi.nf12_moe_combine.restype = C.c_int
-    assert abi.nf12_moe_combine(None, 8, 0, 2**31, 8, None, 8, _stream()) == 1

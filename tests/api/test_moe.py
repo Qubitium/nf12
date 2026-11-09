@@ -6,14 +6,15 @@ torch.compile, serialization, expert parallelism and C API validation."""
 from __future__ import annotations
 
 import ctypes
-
-import pytest
-import torch
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import nf12
+import pytest
+import torch
 from nf12 import reference
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm GPU required")
 
 DEV = "cuda"
 OK, INVALID, UNSUPPORTED, INSUFFICIENT, CUDA_ERROR = range(5)
@@ -347,7 +348,9 @@ def test_fused_moe(t, e, k, inter, topk):
 
 
 @pytest.mark.parametrize("k,inter,n,topk", [(1024, 512, 1024, 1), (2048, 1024, 1024, 4),
-                                         (1024, 1536, 2048, 8), (4096, 2048, 4096, 2)])
+                                         (1024, 1536, 2048, 8), (4096, 2048, 4096, 2),
+                                         (1024, 2048, 1024, 1), (2048, 3584, 2048, 2),
+                                         (4096, 4096, 4096, 2), (4096, 1024, 4096, 4)])
 def test_fused_moe_decode_sources(k, inter, n, topk):
     w13 = experts(2, 2 * inter, k, spread=1)
     w2 = experts(2, n, inter, seed=100, spread=1)
@@ -361,6 +364,7 @@ def test_fused_moe_decode_sources(k, inter, n, topk):
     close(out, composed_moe(x, m13, m2, weights, ids))
     for a, b in ((t13, t2), (m13, t2), (t13, m2)):
         assert_bitwise(out, nf12.fused_moe(x, a, b, weights, ids))
+    assert_bitwise(out, nf12.fused_moe(x, m13, m2, weights, ids))
 
 
 @pytest.mark.parametrize("scales", [[1.0, 2.0**-9, 2.0**-9, -1.0], [-0.0]])
@@ -386,7 +390,7 @@ def test_fused_moe_decode_rounding_boundaries(scales):
 
 
 @pytest.mark.parametrize("t,k,inter,topk", [(0, 1024, 512, 4), (1, 256, 128, 4),
-                                         (1, 1024, 512, 9), (2, 1024, 512, 4)])
+                                         (1, 1024, 512, 9), (2, 1024, 512, 4), (5, 2048, 1024, 2)])
 def test_fused_moe_compositional_fallback(t, k, inter, topk):
     w13, w2 = moe_layer(2, k, inter)
     m13, t2 = nf12.encode_moe(w13), nf12.pack_bf16t_moe(w2)
@@ -768,8 +772,10 @@ def test_c_linear_validation(lib):
     ws_bytes = lib.nf12_moe_linear_workspace_bytes(4, e, n, k, torch.cuda.current_device())
     ws = torch.empty(max(ws_bytes, 1), dtype=torch.uint8, device=DEV)
 
-    def run(x_ptr=x.data_ptr(), ldx=k, gather=None, div=1, scatter=None, offsets=off.data_ptr(), a=4, weight=cw,
-            scale=None, y_ptr=y.data_ptr(), ldy=n, ws_ptr=ws.data_ptr(), wsb=ws_bytes):
+    x_ptr, offsets_ptr, y_ptr, workspace_ptr = x.data_ptr(), off.data_ptr(), y.data_ptr(), ws.data_ptr()
+
+    def run(x_ptr=x_ptr, ldx=k, gather=None, div=1, scatter=None, offsets=offsets_ptr, a=4, weight=cw,
+            scale=None, y_ptr=y_ptr, ldy=n, ws_ptr=workspace_ptr, wsb=ws_bytes):
         return lib.nf12_moe_linear(x_ptr, ldx, gather, div, scatter, offsets, a, ctypes.byref(weight), scale, y_ptr,
                                    ldy, ws_ptr, wsb, stream())
 
@@ -843,3 +849,96 @@ def test_c_silu_mul_validation(lib):
     assert lib.nf12_moe_silu_mul(h.data_ptr(), 128, 2**62, 64, out.data_ptr(), 64, s) == INVALID
     torch.cuda.synchronize()
     assert_bitwise(out, reference.moe_silu_mul(h))
+
+
+@pytest.mark.parametrize("experts,topk", [(1, 1), (4, 2), (20000, 8)])
+def test_empty_moe_align_needs_no_workspace(experts, topk):
+    ids = torch.empty((0, topk), device="cuda", dtype=torch.int32)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        sorted_ids, offsets = nf12.moe_align(ids, experts)
+    stream.synchronize()
+    assert sorted_ids.shape == (0,)
+    assert offsets.shape == (experts + 1,)
+    assert bool((offsets == 0).all())
+
+
+@pytest.mark.parametrize("e,zero_fill", [(1, True), (4, False)], ids=["single-expert", "multiple-experts"])
+def test_routed_gather_tail_is_not_read(moe_pack, e, zero_fill):
+    """SPEC 9.2 leaves the dropped gather tail unspecified, even within a tile."""
+    n, k, topk = 256, 512, 2
+    w = experts(e, n, k, seed=70, scale=.02, spread=0)
+    x = activations(8, k, seed=71) * .05
+    if e == 1:
+        offsets = torch.tensor([0, 3], device=DEV, dtype=torch.int64)
+        gather = torch.tensor([0, 1, 2, 1 << 28, -(1 << 28), 1 << 30, -1, 1 << 27],
+                              device=DEV, dtype=torch.int32)
+    else:
+        ids = torch.tensor([[0, 0], [1, -1], [-1, -1], [2, 3], [0, -1], [3, -1], [-1, -1], [1, 2]],
+                           device=DEV, dtype=torch.int32)
+        gather, offsets = nf12.moe_align(ids, e)
+        gather[int(offsets[-1]):] = torch.iinfo(torch.int32).max
+    valid = int(offsets[-1])
+    assert valid < gather.numel()
+    out = nf12.moe_linear(x, moe_pack(w), offsets, gather=gather, gather_div=topk, zero_fill=zero_fill)
+    ref = reference.moe_linear(x, w, offsets, gather=gather, gather_div=topk)
+    assert bool(out[:valid].isfinite().all())
+    torch.testing.assert_close(out[:valid].float(), ref[:valid].float(), rtol=2e-3, atol=2e-3)
+    if zero_fill:
+        assert bool((out[valid:] == 0).all())
+
+
+@pytest.mark.parametrize("ids", [[0, -1], [-1, -1]], ids=["one-active", "all-dropped"])
+@pytest.mark.parametrize("bad_scale", [float("nan"), float("inf")], ids=["nan", "inf"])
+def test_fused_moe_dropped_assignment_ignores_router_scale(moe_pack, ids, bad_scale):
+    e, k, inter = 2, 256, 128
+    w13 = experts(e, 2 * inter, k, seed=72, scale=.02, spread=0)
+    w2 = experts(e, k, inter, seed=73, scale=.02, spread=0)
+    x = activations(1, k, seed=74) * .05
+    ids = torch.tensor([ids], device=DEV, dtype=torch.int32)
+    weights = torch.tensor([[1., bad_scale]], device=DEV, dtype=torch.float32)
+    out = nf12.fused_moe(x, moe_pack(w13), moe_pack(w2), weights, ids)
+    assert bool(out.isfinite().all())
+    ref = reference.fused_moe(x, w13, w2, weights, ids)
+    torch.testing.assert_close(out.float(), ref.float(), rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("operation", ["dense", "routed", "fused"])
+def test_inference_streams_own_their_scratch(moe_pack, operation):
+    """Different inputs on simultaneous streams expose accidental scratch reuse."""
+    e, k, inter, t, topk = 4, 512, 256, 32, 2
+    w13 = experts(e, 2 * inter, k, seed=60, scale=.02, spread=0)
+    w2 = experts(e, k, inter, seed=61, scale=.02, spread=0)
+    a, b = moe_pack(w13), moe_pack(w2)
+    if operation == "dense":
+        dense = nf12.encode(w13[0]) if isinstance(a, nf12.NF12MoEWeight) else nf12.pack_bf16t(w13[0])
+        linear = nf12.linear if isinstance(a, nf12.NF12MoEWeight) else nf12.linear_bf16t
+    weights, ids = routing(t, e, topk, seed=62)
+    gather, offsets = nf12.moe_align(ids, e)
+
+    def run(x):
+        if operation == "dense":
+            return linear(x, dense)
+        if operation == "fused":
+            return nf12.fused_moe(x[:1], a, b, weights[:1], ids[:1])
+        return nf12.moe_linear(x, a, offsets, gather=gather, gather_div=topk,
+                               scatter=gather, row_scale=weights.reshape(-1), zero_fill=True)
+
+    inputs = [activations(t, k, seed=63 + i) * .05 for i in range(2)]
+    expected = [run(x) for x in inputs]  # also warm up before threaded calls
+    producer = torch.cuda.current_stream()
+    streams = [torch.cuda.Stream() for _ in inputs]
+    for stream in streams:
+        stream.wait_stream(producer)
+    barrier = threading.Barrier(2)
+
+    def worker(i):
+        with torch.cuda.device(inputs[i].device), torch.cuda.stream(streams[i]):
+            barrier.wait(timeout=30)
+            outputs = [run(inputs[i]) for _ in range(16)]
+        streams[i].synchronize()
+        for out in outputs:
+            assert_bitwise(out, expected[i])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(worker, range(2)))

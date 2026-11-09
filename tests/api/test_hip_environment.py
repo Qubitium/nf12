@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-GATE = Path(__file__).parents[1] / "hip" / "conftest.py"
+GATE = Path(__file__).parents[1] / "conftest.py"
 configure = runpy.run_path(str(GATE))["pytest_configure"]
 
 

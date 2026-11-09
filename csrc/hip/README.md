@@ -171,8 +171,9 @@ cmake --build build/hip --target nf12_torch -j
 which exist in ROCm's `libtorch_hip.so`; `USE_ROCM` exposes the stream shim in
 torch's stable-ABI header.
 
-Coverage, all exercised by `tests/hip/test_torch_ops.py` and
-`tests/hip/test_torch_moe.py`:
+Coverage, all exercised by the shared `tests/api/test_torch.py`,
+`tests/api/test_moe.py` and `tests/api/test_codec_contracts.py` suites, which run
+against whichever backend is loaded:
 
 | op | ROCm status |
 | --- | --- |
@@ -219,7 +220,7 @@ The fused route is faster at every shape measured (1.08× to 2.53×): it drops
 `moe_align`, `moe_silu_mul` and `moe_combine` plus the two intermediate BF16
 round-trips. It is *not* bit-identical to the composed route -- the K walk has a
 different FP32 association order, exactly like the CUDA fused kernel -- so
-`tests/hip/test_torch_moe.py` asserts the SPEC 6.2 tolerance against both the
+`tests/api/test_moe.py` asserts the SPEC 6.2 tolerance against both the
 reference and the composed path, plus determinism and multi-stream independence.
 
 Two deliberate choices:
@@ -233,7 +234,7 @@ Two deliberate choices:
   exactness reference for the nf12 route (SPEC §6.2), so it must run the same
   arithmetic. It now also runs the same `(tiles, splits, m_blocks)` plan, which
   means it needs the split-K partial plane whenever the nf12 route does; the two
-  are then bitwise identical, which `tests/hip/test_torch_moe.py` asserts.
+  are then bitwise identical, which `tests/api/test_moe.py` asserts.
 
 `moe_linear` reuses the dense matrix-core kernel with a row map enabled
 (`kRouted`): one CTA per (expert, 16-row weight block, 16-assignment tile), the
