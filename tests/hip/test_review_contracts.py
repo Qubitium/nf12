@@ -21,6 +21,23 @@ class MoeWeight(C.Structure):
                 ("experts", C.c_int64), ("n", C.c_int64), ("k", C.c_int64)]
 
 
+@pytest.mark.parametrize("magnitude,bias_value", [(2.**25, 1.), (1., 2.**-25), (2.**127, 2.**127)])
+def test_split_k_bias_follows_complete_reduction(abi, magnitude, bias_value):
+    m, n, k = 16, 16, 512
+    assert abi.nf12_hip_linear_wmma_workspace_bytes(n, k, m) > 0
+    w = torch.zeros((n, k), device="cuda", dtype=torch.bfloat16)
+    w[:, 0], w[:, 64] = magnitude, -magnitude
+    x = torch.ones((m, k), device="cuda", dtype=torch.bfloat16)
+    bias = torch.full((n,), bias_value, device="cuda", dtype=torch.bfloat16)
+    # The two nonzero products cancel exactly. Bias must survive unchanged,
+    # including when adding it to an unreduced partial would overflow FP32.
+    expected = bias.expand(m, n).contiguous()
+    for linear, weight in ((nf12.linear, nf12.encode(w)), (nf12.linear_bf16t, nf12.pack_bf16t(w))):
+        out = linear(x, weight, bias)
+        assert bool(out.isfinite().all())
+        assert torch.equal(out.view(torch.int16), expected.view(torch.int16))
+
+
 @pytest.fixture
 def abi(lib):
     p, i, sz = C.c_void_p, C.c_int64, C.c_size_t

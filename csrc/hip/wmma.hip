@@ -398,10 +398,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     for (int i = 0; i < 8; ++i) {
       const int64_t row = origin + 8 * (lane >> 4) + i;
       if (row < lo || row >= hi) continue;
-      // With split-K each split writes its own FP32 partial plane and the
-      // reduce kernel sums them, so bias must be added exactly once across
-      // the splits (adding it in every split multiplied it by kSplits).
-      float v = acc[t][i] + ((kSplits == 1 || blockIdx.z == 0) ? bias_v : 0.0f);
+      // Split-K partials remain unbiased: adding bias to one partial can
+      // discard it (or overflow) before cancellation in the final reduction.
+      float v = acc[t][i];
+      if constexpr (kSplits == 1) v += bias_v;
       if constexpr (kRouted) {
         // Scatter to the assignment's output row and apply the router weight in
         // FP32 before the single BF16 rounding (SPEC.md 9.2).
@@ -423,11 +423,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // is identical to a single-pass FP32 accumulation followed by one rounding
 // (splitting K only changes the association order of the FP32 adds).
 __global__ void wmma_reduce_kernel(const float* __restrict__ partial, __hip_bfloat16* __restrict__ out,
-                                   int64_t total, int splits, int64_t n, int64_t ldy) {
+                                   int64_t total, int splits, int64_t n, int64_t ldy,
+                                   const __hip_bfloat16* __restrict__ bias) {
   for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < total;
        i += int64_t(gridDim.x) * blockDim.x) {
     float s = partial[i];
     for (int j = 1; j < splits; ++j) s += partial[int64_t(j) * total + i];
+    if (bias != nullptr) s += __bfloat162float(bias[i % n]);
     const int64_t dst = ldy == n ? i : (i / n) * ldy + i % n;
     out[dst] = __float2bfloat16(s);
   }
@@ -748,7 +750,8 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
     if (rb > 128) rb = 128;
     const int reduce_blocks = rb;
     wmma_reduce_kernel<<<reduce_blocks, 256, 0, stream>>>(
-        partial, reinterpret_cast<__hip_bfloat16*>(out), total, splits, n, ldy);
+        partial, reinterpret_cast<__hip_bfloat16*>(out), total, splits, n, ldy,
+        reinterpret_cast<const __hip_bfloat16*>(bias));
     status = hipGetLastError();
   }
   return status;
