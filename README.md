@@ -62,6 +62,9 @@ and the whole MoE op set (`moe_align`, `moe_linear`, `moe_combine`,
 native two-kernel fused route instead of the composed one; see
 [`csrc/hip/README.md`](csrc/hip/README.md).
 
+Validated on **ROCm 10.1.0 with HIP 7.16.26385** on Radeon AI PRO R9700
+(`gfx1201`). See the [validated toolchain and test instructions](tests/hip/README.md).
+
 Build from source with the ROCm toolkit, a C++ compiler, CMake 3.26+ and Ninja.
 
 ```bash

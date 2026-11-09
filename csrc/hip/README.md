@@ -9,6 +9,12 @@ full MoE op set are implemented and validated on a Radeon AI PRO R9700
 (`gfx1201`)**, and wired into `python/nf12` / `torch.ops.nf12` — the torch
 extension builds on ROCm and shares `csrc/torch/ops.cpp` with the CUDA build.
 
+Validated toolchain: **ROCm SDK 10.1.0**, **HIP 7.16.26385**
+(`hipconfig --version`: `7.16.26385-0000000`), and
+**PyTorch 2.16.0.dev20261025+rocm10.1**, with free-threaded Python.
+ROCm release numbers and HIP component versions are distinct;
+`torch.version.hip` reports HIP. See [test setup](../../tests/hip/README.md).
+
 ## What is here
 
 | File | Contents |

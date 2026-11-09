@@ -21,6 +21,7 @@ import torch
 # libnf12_hip.so and the op layer in libnf12_torch.so (the same ops.cpp as the
 # CUDA build), so the artifact names differ but the set does not.
 _LIBRARIES_CUDA = ("libnf12.so", "libnf12_torch.so")
+# Validated: ROCm SDK 10.1.0 / HIP 7.16.26385 on gfx1201; see tests/hip/README.md.
 _LIBRARIES_HIP = ("libnf12_hip.so", "libnf12_torch.so")
 _BUILD_ENV = (
     "CUDACXX", "CUDA_HOME", "CUDA_PATH", "CUDAHOSTCXX", "CXX", "CXXFLAGS",

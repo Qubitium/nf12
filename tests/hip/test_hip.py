@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """C-ABI tests for the RDNA4 HIP library (``libnf12_hip.so``).
 
-The CUDA torch extension is not built on ROCm, so these tests drive the plain
-C API in ``include/nf12/nf12_hip.h`` through ctypes. Accuracy uses the same
+Validated on ROCm 10.1.0 / HIP 7.16.26385 (R9700); see README.md here.
+
+These tests drive the plain C API in ``include/nf12/nf12_hip.h`` through ctypes. Accuracy uses the same
 ``|err| <= 2e-3 + 2e-3*|ref|`` gate as the CUDA tests.
 
 The primary contract test is against a BF16 twin (SPEC.md section 6.2): NF12
