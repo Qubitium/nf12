@@ -96,3 +96,15 @@ def test_chunk_workspace_covers_tail_plan(abi, m):
     assert bool((ws[need:] == 0xA5).all())
     assert bool((out == k).all())
     assert torch.equal(out.view(torch.int16), twin_out.view(torch.int16))
+
+
+@pytest.mark.parametrize("experts,topk", [(1, 1), (4, 2), (20000, 8)])
+def test_empty_moe_align_needs_no_workspace(abi, experts, topk):
+    ids = torch.empty((0, topk), device="cuda", dtype=torch.int32)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        sorted_ids, offsets = nf12.moe_align(ids, experts)
+    stream.synchronize()
+    assert sorted_ids.shape == (0,)
+    assert offsets.shape == (experts + 1,)
+    assert bool((offsets == 0).all())

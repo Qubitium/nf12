@@ -402,22 +402,21 @@ hipError_t nf12_hip_moe_align(const int32_t* topk_ids, int64_t num_tokens, int64
   }
   if (num_tokens > 0x7fffffffLL / topk) return hipErrorInvalidValue;
   const int64_t num_assignments = num_tokens * topk;
-  const AlignPlan pl = align_plan(num_assignments, num_experts);
-  const size_t needed = pl.bytes;
-  if (workspace_bytes < needed || (needed > 0 && workspace == nullptr)) {
-    return hipErrorInvalidValue;
-  }
   if (num_assignments == 0) {
     // No ids: still publish zero offsets.
     if (expert_offsets_out != nullptr) {
       const size_t bytes = static_cast<size_t>(num_experts + 1) * sizeof(int64_t);
-      if (hipMemsetAsync(expert_offsets_out, 0, bytes, stream) != hipSuccess) {
-        return hipGetLastError();
-      }
+      return hipMemsetAsync(expert_offsets_out, 0, bytes, stream);
     }
     return hipSuccess;
   }
   if (topk_ids == nullptr || sorted_out == nullptr || expert_offsets_out == nullptr) {
+    return hipErrorInvalidValue;
+  }
+
+  const AlignPlan pl = align_plan(num_assignments, num_experts);
+  const size_t needed = pl.bytes;
+  if (workspace_bytes < needed || (needed > 0 && workspace == nullptr)) {
     return hipErrorInvalidValue;
   }
 
