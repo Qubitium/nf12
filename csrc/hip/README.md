@@ -581,6 +581,14 @@ rather than arch-based:
   launch plan applies, and it binds only on short-K shapes: `896×4864` at
   `m = 32` went 1.064 → 1.094.
 
+A third plan variant was tried and dropped. On wide N, four column tiles per
+CTA already fill the machine on their own (`5120×25600` has 1600 column tiles,
+so 400 CTAs), which would let K stay whole and delete the partial plane
+entirely. It helps where it applies — `4096×28672` at `m = 64` goes 1.184 →
+1.235 and `5120×25600` at `m = 128` gets 14% faster in absolute time — but it
+costs 5% at `5120×25600` `m = 64` and 28% at `4096×14336` `m = 128` (224 CTAs
+of 256 threads instead of 224 of 512). Not a uniform win, so it is not shipped.
+
 **MoE (MI300X, `mixtral-8x7b` E=8 topk=2, uniform routing):** `moe_linear` is
 1087 / 3241 / 11655 µs for `w13` and 585 / 1503 / 4997 µs for `w2` at
 `t = 64 / 256 / 1024` on the fused routed MFMA kernel, **1.01–1.08× faster than
