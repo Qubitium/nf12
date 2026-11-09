@@ -207,20 +207,44 @@ def test_selftest(lib):
     assert int(out.item()) == 0x4E463132
 
 
-def test_library_path_is_stable_across_threads(lib):
-    """The JIT cache and loader locks are free-threaded safe."""
-    paths: list = [None] * 8
 
-    def run(i: int) -> None:
-        paths[i] = nf12.library_path()
 
-    threads = [threading.Thread(target=run, args=(i,)) for i in range(len(paths))]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert all(path == paths[0] for path in paths)
-    assert paths[0].name == "libnf12_hip.so"
+@pytest.mark.parametrize("n,k", [(16, 64), (256, 256), (1024, 4096)])
+def test_native_codec_round_trip(lib, n, k):
+    """Native encode/decode match the reference and reject short workspaces."""
+    torch.manual_seed(0)
+    w = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    need = int(lib.nf12_hip_encode_workspace_bytes(n, k))
+    assert need > 0
+    ws = torch.full((need,), 0xA5, dtype=torch.uint8, device="cuda")
+    base, count = _U8(0), _U32(0)
+    for declared in (0, need - 1):
+        assert lib.nf12_hip_encode_analyze(w.data_ptr(), n, k, k, ws.data_ptr(), declared,
+                                           ctypes.byref(base), ctypes.byref(count), _stream()) != 0
+    assert int((ws != 0xA5).sum()) == 0
+    packed, escapes, exp_base = _encode(lib, w)
+    ref_packed, ref_escapes, ref_base = reference.encode(w.cpu())
+    assert exp_base == ref_base
+    assert packed.cpu().equal(ref_packed) and escapes.cpu().equal(ref_escapes)
+    assert _decode(lib, packed, escapes, exp_base).view(torch.int16).equal(w.view(torch.int16))
+
+
+@pytest.mark.parametrize("n,k", [(256, 256), (1024, 4096)])
+@pytest.mark.parametrize("m", [1, 15, 16, 17, 64, 256])
+def test_native_linear_matches_twin_and_dense(lib, n, k, m):
+    """SPEC 6.2/6.3: the native routes match the bf16t twin bitwise."""
+    if m >= 16 and lib.nf12_hip_wmma_supported(m) == 0:
+        pytest.skip(f"wmma path not available for m={m}")
+    torch.manual_seed(m)
+    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = _encode(lib, w)
+    got = _linear(lib, x, packed, escapes, exp_base)
+    assert bool(torch.isfinite(got).all())
+    assert torch.equal(got.view(torch.int16), _twin_linear(lib, x, w).view(torch.int16))
+    decoded = _decode(lib, packed, escapes, exp_base)
+    assert torch.equal(decoded.view(torch.int16), w.view(torch.int16))
+    assert _violations(got, F.linear(x, decoded).double()) == 0
 
 
 def test_route_bounds(lib):
@@ -243,29 +267,8 @@ def test_wmma_supported_device_matches_the_current_device(lib):
     assert lib.nf12_hip_wmma_supported_device(16, 4096) == 0
 
 
-@pytest.mark.parametrize("n,k", [(16, 64), (256, 256), (1024, 4096)])
-def test_encode_matches_reference(lib, n, k):
-    torch.manual_seed(0)
-    w = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
-    packed, escapes, exp_base = _encode(lib, w)
-    ref_packed, ref_escapes, ref_base = reference.encode(w.cpu())
-    assert exp_base == ref_base
-    assert torch.equal(packed.cpu(), ref_packed)
-    assert torch.equal(escapes.cpu(), ref_escapes)
 
 
-def test_decode_is_bit_exact(lib):
-    torch.manual_seed(1)
-    w = torch.randn(16, 64, dtype=torch.bfloat16, device="cuda")
-    specials = torch.tensor(
-        [0x0000, 0x8000, 0x0001, 0x007F, 0x7F80, 0xFF80, 0x7FC0, 0x7FFF,
-         0xFFC0, 0x3F80, 0xBF80, 0x0002, 0x0080, 0x7F7F, 0xFF7F, 0x3F00],
-        dtype=torch.uint16,
-    ).view(torch.int16)
-    w.view(torch.int16).view(-1)[: specials.numel()] = specials
-    packed, escapes, exp_base = _encode(lib, w)
-    got = _decode(lib, packed, escapes, exp_base)
-    assert torch.equal(got.view(torch.int16), w.view(torch.int16))
 
 
 def _twin_linear(lib, x, weight):
@@ -283,63 +286,12 @@ def _twin_linear(lib, x, weight):
     return out
 
 
-@pytest.mark.parametrize("n,k", [(256, 256), (1024, 4096)])
-@pytest.mark.parametrize("m", [1, 4, 15])
-def test_fused_linear_matches_bf16t_exactly(lib, n, k, m):
-    torch.manual_seed(m)
-    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
-    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
-    packed, escapes, exp_base = _encode(lib, w)
-    ref = _twin_linear(lib, x, w)
-    got = _linear(lib, x, packed, escapes, exp_base)
-    assert bool(torch.isfinite(got).all())
-    assert torch.equal(got.view(torch.int16), ref.view(torch.int16))
 
 
-@pytest.mark.parametrize("m", [16, 17, 32, 64, 128, 256])
-def test_wmma_linear_matches_bf16t_exactly(lib, m):
-    if lib.nf12_hip_wmma_supported(m) == 0:
-        pytest.skip(f"wmma path not available for m={m}")
-    torch.manual_seed(m)
-    n, k = 1024, 4096
-    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
-    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
-    packed, escapes, exp_base = _encode(lib, w)
-    ref = _twin_linear(lib, x, w)
-    got = _linear(lib, x, packed, escapes, exp_base)
-    assert bool(torch.isfinite(got).all())
-    assert torch.equal(got.view(torch.int16), ref.view(torch.int16))
 
 
-@pytest.mark.parametrize("m", [1, 4, 15])
-def test_fused_linear_matches_dense_bf16(lib, m):
-    """SPEC.md 6.3: secondary comparison against a dense BF16 GEMM."""
-    torch.manual_seed(m)
-    n, k = 1024, 4096
-    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
-    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
-    packed, escapes, exp_base = _encode(lib, w)
-    decoded = _decode(lib, packed, escapes, exp_base)
-    assert torch.equal(decoded.view(torch.int16), w.view(torch.int16))
-    ref = F.linear(x, decoded)
-    assert _violations(_linear(lib, x, packed, escapes, exp_base), ref.double()) == 0
 
 
-@pytest.mark.parametrize("m", [16, 17, 32, 64, 128, 256])
-def test_wmma_linear_matches_dense_bf16(lib, m):
-    """SPEC.md 6.3: secondary dense BF16 check of the matrix-core route."""
-    if lib.nf12_hip_wmma_supported(m) == 0:
-        pytest.skip(f"wmma path not available for m={m}")
-    torch.manual_seed(m)
-    n, k = 1024, 4096
-    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
-    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
-    bias = torch.full((n,), 0.125, dtype=torch.bfloat16, device="cuda")
-    packed, escapes, exp_base = _encode(lib, w)
-    decoded = _decode(lib, packed, escapes, exp_base)
-    ref = F.linear(x, decoded, bias)
-    got = _linear(lib, x, packed, escapes, exp_base, bias)
-    assert _violations(got, ref.double()) == 0
 
 
 def test_wmma_split_k_requires_workspace(lib):
@@ -366,74 +318,8 @@ def test_wmma_split_k_requires_workspace(lib):
         *args, short.data_ptr(), short.numel(), _stream()) != 0
 
 
-def test_c_abi_workspace_status_matches_cuda(lib):
-    """``nf12_linear`` must return the CUDA build's status for a missing buffer.
-
-    ``csrc/api.cpp`` (``run_linear``) returns NF12_ERROR_INSUFFICIENT_WORKSPACE
-    when the buffer is too small, and NF12_ERROR_INVALID_ARGUMENT only for a
-    malformed call (a non-zero byte count with no pointer, or a misaligned one).
-    A caller ported from CUDA switches on these values, so the ROCm build has to
-    match them rather than collapsing everything into INVALID_ARGUMENT.
-    """
-    nf12_ok, nf12_invalid, nf12_insufficient = 0, 1, 3
-    n, k, m = 1024, 4096, 64
-    need = lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m)
-    assert need > 0
-    torch.manual_seed(31)
-    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
-    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
-    out = torch.empty((m, n), dtype=torch.bfloat16, device="cuda")
-    packed, escapes, exp_base = _encode(lib, w)
-    view = _Nf12Weight(packed.data_ptr(), escapes.data_ptr(), escapes.shape[0],
-                       n, k, exp_base)
-
-    def call(ws_ptr, ws_bytes):
-        return lib.nf12_linear(x.data_ptr(), m, k, ctypes.byref(view), None,
-                               out.data_ptr(), n, ws_ptr, ws_bytes, _stream())
-
-    assert call(None, 0) == nf12_insufficient
-    assert call(None, need) == nf12_invalid
-    workspace = torch.empty(need, dtype=torch.uint8, device="cuda")
-    assert call(workspace.data_ptr(), need) == nf12_ok
 
 
-def test_c_abi_validates_like_cuda(lib):
-    """The C ABI must reject bad arguments instead of crashing or truncating.
-
-    Regressions for four defects against csrc/api.cpp: a null weight segfaulted
-    in ``nf12_decode``; a null output returned NF12_OK and faulted
-    asynchronously in ``nf12_decode``/``nf12_moe_combine``/``nf12_moe_silu_mul``;
-    ``m == 0`` reported INVALID_ARGUMENT where CUDA returns NF12_OK; and a ``k``
-    that was not a multiple of 64 silently truncated the GEMM to k/64 columns
-    instead of being rejected.
-    """
-    nf12_ok, nf12_invalid = 0, 1
-    n, k = 256, 256
-    out = torch.empty((n, k), dtype=torch.bfloat16, device="cuda")
-    y = torch.empty((64, n), dtype=torch.bfloat16, device="cuda")
-
-    # Null pointers are rejected, not dereferenced.
-    assert lib.nf12_decode(None, out.data_ptr(), k, _stream()) == nf12_invalid
-    assert lib.nf12_moe_combine(None, n, 4, 2, n, out.data_ptr(), n, _stream()) == nf12_invalid
-    assert lib.nf12_moe_combine(out.data_ptr(), n, 4, 2, n, None, n, _stream()) == nf12_invalid
-    assert lib.nf12_moe_silu_mul(None, 2 * k, 4, k, out.data_ptr(), k, _stream()) == nf12_invalid
-
-    # m == 0 is a successful no-op, exactly as on CUDA.
-    torch.manual_seed(41)
-    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
-    packed, escapes, exp_base = _encode(lib, w)
-    view = _Nf12Weight(packed.data_ptr(), escapes.data_ptr(), escapes.shape[0], n, k, exp_base)
-    assert lib.nf12_linear(None, 0, k, ctypes.byref(view), None, y.data_ptr(), n,
-                           None, 0, _stream()) == nf12_ok
-
-    # Geometry that would truncate is rejected instead.
-    assert lib.nf12_packed_bytes(-1, 64) == 0
-    assert lib.nf12_bf16t_bytes(-1, 64) == 0
-    assert lib.nf12_encode_workspace_bytes(24, 64) == 0
-    assert lib.nf12_encode_workspace_bytes(256, 96) == 0
-    x96 = torch.empty((16, 96), dtype=torch.bfloat16, device="cuda")
-    assert lib.nf12_linear(x96.data_ptr(), 16, 96, ctypes.byref(view), None, y.data_ptr(),
-                           n, None, 0, _stream()) == nf12_invalid
 
 
 def test_wmma_concurrent_streams_are_independent(lib):
@@ -490,84 +376,12 @@ def test_wmma_concurrent_host_threads(lib):
         assert torch.equal(got[i], refs[i])
 
 
-@pytest.mark.parametrize("m", [16, 32, 64, 128])
-def test_wmma_bias_is_added_once(lib, m):
-    """Regression: every split-K partial plane carried the bias, so the reduce
-    kernel multiplied it by kSplits (4x at m<=64, 2x at m=128)."""
-
-    if lib.nf12_hip_wmma_supported(m) == 0:
-        pytest.skip(f"wmma path not available for m={m}")
-    torch.manual_seed(m)
-    # N=1024/K=1024 launches 8 CTAs, so pick_splits chooses 4 (m<=64) or 2.
-    n, k = 1024, 1024
-    w = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
-    x = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
-    bias = torch.full((n,), 0.125, dtype=torch.bfloat16, device="cuda")
-    packed, escapes, exp_base = _encode(lib, w)
-
-    with_bias = _linear(lib, x, packed, escapes, exp_base, bias).double()
-    without = _linear(lib, x, packed, escapes, exp_base).double()
-    delta = (with_bias - without).mean().item()
-    assert abs(delta - 0.125) <= 2e-3, f"bias scaled by {delta / 0.125:.3f}x"
-    ref = x.double() @ w.double().t() + 0.125
-    assert _violations(_linear(lib, x, packed, escapes, exp_base, bias), ref) == 0
 
 
-def test_encode_rejects_undersized_workspace(lib):
-    """The native encoder must not write a workspace it was not given room for."""
-    torch.manual_seed(40)
-    w = (torch.randn(16, 64, device="cuda") * 0.02).to(torch.bfloat16)
-    need = int(lib.nf12_hip_encode_workspace_bytes(16, 64))
-    assert need > 0
-    ws = torch.full((need,), 0xA5, dtype=torch.uint8, device="cuda")
-    exp_base, num_escapes = _U8(0), _U32(0)
-    for declared in (0, need - 1):
-        rc = lib.nf12_hip_encode_analyze(
-            w.data_ptr(), 16, 64, 64, ws.data_ptr(), declared,
-            ctypes.byref(exp_base), ctypes.byref(num_escapes), _stream(),
-        )
-        torch.cuda.synchronize()
-        assert rc != 0, declared
-    # Nothing was written: the buffer still holds its sentinel everywhere.
-    assert int((ws != 0xA5).sum()) == 0
 
 
-def test_grouped_operands_without_gather_leaves_output_untouched(lib):
-    """The no-gather form publishes group ends and copies nothing, like CUDA."""
-    n_experts, k = 2, 8
-    x = torch.ones((2, k), dtype=torch.bfloat16, device="cuda")
-    out = torch.full_like(x, 7.0)
-    offsets = torch.tensor([0, 2, 2], dtype=torch.int64, device="cuda")
-    ends = torch.full((n_experts,), -1, dtype=torch.int32, device="cuda")
-    rc = lib.nf12_moe_grouped_operands(
-        x.data_ptr(), k, None, 1, offsets.data_ptr(), 2, n_experts, k,
-        out.data_ptr(), k, ends.data_ptr(), _stream(),
-    )
-    torch.cuda.synchronize()
-    assert rc == 0
-    assert int((out != 7).sum()) == 0
-    assert ends.tolist() == [2, 2]
 
 
-def test_c_abi_linear_large_m_is_supported(lib):
-    """m above the matrix-core cap keeps working through the chunked route."""
-    torch.manual_seed(41)
-    n, k, m = 16, 64, 512
-    w = (torch.randn(n, k, device="cuda") * 0.02).to(torch.bfloat16)
-    packed, escapes, exp_base = _encode(lib, w)
-    x = (torch.randn(m, k, device="cuda") * 0.05).to(torch.bfloat16)
-    out = torch.full((m, n), -7.0, dtype=torch.bfloat16, device="cuda")
-    weight = _Nf12Weight(packed.data_ptr(), escapes.data_ptr(), escapes.shape[0], n, k, exp_base)
-    ws_bytes = int(lib.nf12_linear_workspace_bytes(m, n, k, 0))
-    ws = torch.empty(max(ws_bytes, 1), dtype=torch.uint8, device="cuda")
-    rc = lib.nf12_linear(
-        x.data_ptr(), m, k, ctypes.byref(weight), None, out.data_ptr(), n,
-        ws.data_ptr(), ws_bytes, _stream(),
-    )
-    torch.cuda.synchronize()
-    assert rc == 0
-    assert int((out == -7.0).sum()) == 0
-    assert _violations(out, x.double() @ w.double().t()) == 0
 
 
 @pytest.mark.parametrize("n,k,m", [

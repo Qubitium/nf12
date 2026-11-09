@@ -214,3 +214,19 @@ def test_moe_decode_accepts_large_grid_x(abi):
 def test_moe_invalid_expert_count_and_empty_topk(abi):
     assert abi.nf12_moe_align_workspace_bytes(1, 1, 2**31) == 0
     assert abi.nf12_moe_combine(None, 8, 0, 2**31, 8, None, 8, _stream()) == 1
+
+
+def test_grouped_operands_without_gather_leaves_output_untouched(abi):
+    """The no-gather form publishes group ends and copies nothing."""
+    experts, k = 2, 8
+    x = torch.ones((2, k), dtype=torch.bfloat16, device="cuda")
+    out = torch.full_like(x, 7.0)
+    offsets = torch.tensor([0, 2, 2], dtype=torch.int64, device="cuda")
+    ends = torch.full((experts,), -1, dtype=torch.int32, device="cuda")
+    assert abi.nf12_moe_grouped_operands(
+        x.data_ptr(), k, None, 1, offsets.data_ptr(), 2, experts, k,
+        out.data_ptr(), k, ends.data_ptr(), _stream(),
+    ) == 0
+    torch.cuda.synchronize()
+    assert int((out != 7).sum()) == 0
+    assert ends.tolist() == [2, 2]

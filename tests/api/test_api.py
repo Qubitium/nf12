@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 
 import pytest
 import torch
@@ -186,6 +187,7 @@ def test_linear_invalid_arguments(lib):
     assert run(ldx=k - 8) == INVALID
     assert run(ldx=k + 4) == INVALID  # ld % 8 != 0
     assert run(ldy=n - 8) == INVALID
+    assert run(mm=0) == OK  # an empty row block is a no-op, as on CUDA
     assert run(mm=-1) == INVALID
     assert run(bp=ptr(bias, 2)) == INVALID
     assert run(w=None) == INVALID
@@ -229,6 +231,8 @@ def test_insufficient_workspace(lib):
     assert status == INSUFFICIENT
     status = lib.nf12_linear(ptr(x), m, k, ctypes.byref(weight), None, ptr(y), n, None, 0, stream())
     assert status == INSUFFICIENT
+    # A nonzero byte count with no pointer is a malformed call, not a short one.
+    assert lib.nf12_linear(ptr(x), m, k, ctypes.byref(weight), None, ptr(y), n, None, need, stream()) == INVALID
     assert lib.nf12_linear(ptr(x), m, k, ctypes.byref(weight), None, ptr(y), n, ptr(ws), need, stream()) == OK
 
 
@@ -288,3 +292,19 @@ def test_codec_invalid_arguments(lib):
     assert lib.nf12_pack_bf16t(ptr(w, 2), n, k, k + 8, ptr(wt), stream()) == INVALID
     assert lib.nf12_pack_bf16t(ptr(w), n, 100, k + 8, ptr(wt), stream()) == INVALID
     torch.cuda.synchronize()
+
+
+def test_library_path_is_stable_across_threads():
+    """The JIT cache and loader locks are free-threaded safe."""
+    paths: list = [None] * 8
+
+    def run(i: int) -> None:
+        paths[i] = nf12.library_path()
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(len(paths))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert all(path == paths[0] for path in paths)
+    assert paths[0] == nf12.library_path()
