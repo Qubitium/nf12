@@ -414,29 +414,41 @@ slower, so a token count in that range rounds up to the next usable
 instantiation (8 or 16) and the epilogue drops the extra rows. `m = 15` was
 2.5 ms before that rounding.
 
-The packed weight is still never materialised. `kSplits` follows the tile
-height: a short tile has fewer MFMA per barrier and needs more CTAs to hide
-latency, a tall one already has the work and pays for a larger partial plane.
+The packed weight is still never materialised. `kSplits` is the smallest power
+of two that reaches a target CTA count, and the target shrinks as the tile
+grows: a short tile is small enough that several fit on a CU and does little
+MFMA per barrier, so it needs more CTAs to hide latency; a tall tile already
+occupies half or all of a CU's shared memory and saturates with fewer, so it
+does not pay for a partial plane it cannot use.
 
 **Dense linear (MI300X), cold-L2 µs, `n=4096 k=4096`:**
 
 | m | route | nf12 µs | bf16t twin µs | bf16 torch µs |
 | ---: | --- | ---: | ---: | ---: |
 | 1 | fused GEMV (16 groups) | 10.8 | 11.4 | 14.2 |
-| 16 | fused MFMA | 21.2 | 21.6 | 14.8 |
-| 32 | fused MFMA | 24.0 | 25.3 | 15.7 |
-| 64 | fused MFMA | 25.8 | 28.2 | 17.6 |
+| 16 | fused MFMA | 19.0 | 20.2 | 14.8 |
+| 32 | fused MFMA | 21.6 | 22.6 | 15.8 |
+| 64 | fused MFMA | 25.9 | 28.2 | 17.5 |
 | 128 | fused MFMA | 35.5 | 38.3 | 22.0 |
 | 256 | decode + rocBLAS | 46.9 | 70.1 | 33.1 |
 
-That is 8.2× faster than the first CDNA3 cut at `m = 64` (215.5 µs) and 4.9× at
+That is 8.3× faster than the first CDNA3 cut at `m = 64` (215.5 µs) and 5.0× at
 `m = 128` (178.1 µs). The nf12/bf16t column is the honest measure of what the
 format buys, because both run the same kernel: nf12 now wins every shape in the
-PR #3 grid, **1.02–1.15×**, because it reads a quarter fewer weight bytes and
+PR #3 grid, **1.04–1.15×**, because it reads a quarter fewer weight bytes and
 the decode is amortised over the whole CTA. Against `torch.matmul` on the dense
-BF16 weight nf12 wins only at `m = 1` (1.32×); above that the fused decode
-cannot match rocBLAS, which reads the weight once and has almost no activation
-traffic.
+BF16 weight nf12 wins at `m = 1` (**1.14–1.32×**) and loses above it (0.56–0.86×).
+
+The loss above `m = 1` is traffic, not arithmetic. Split-K is what fills 304
+CUs from 256 column tiles, and each split adds another `m*n*4`-byte FP32
+partial plane plus its read-back. At `m = 128, n = 4096` the weight is 25.2 MB
+but the eight-split partial plane is 16.8 MB written and 16.8 MB read, so the
+kernel moves 59.8 MB where rocBLAS moves 34.5 MB. Removing the split
+(`kSplits = 1`) drops the ratio arithmetic to the format's 1.32 ceiling but
+starves the machine: measured 108.5 µs against 25.9 µs at `m = 64`, `n = 4096`.
+That trade — ratio or absolute speed — is why this route cannot reach 1.3×
+over `torch.matmul` at `m >= 16` without a stream-K style decomposition that
+bounds the partial plane by the CTA count instead of by `m*n*kSplits`.
 
 **MoE (MI300X, `mixtral-8x7b` E=8 topk=2, uniform routing):** `moe_linear` is
 1087 / 3241 / 11655 µs for `w13` and 585 / 1503 / 4997 µs for `w2` at
