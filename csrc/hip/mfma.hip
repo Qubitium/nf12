@@ -498,9 +498,32 @@ __global__ void __launch_bounds__(kWave * kCols)
 // Sums the per-split FP32 planes in ascending split order and applies bias
 // before the single BF16 rounding. Split order, not atomic order, so the result
 // is bit-identical from run to run.
-__global__ void mfma_reduce_kernel(const float* __restrict__ partial, int64_t total, int splits,
+//
+// The split count is a template parameter so every split's load can be issued
+// before the first add. The scalar form's `s += partial[j*total+i]` is a
+// dependent chain and exposes one global latency per split; at m=16, n=4096
+// that alone was a fifth of the whole call.
+template <int kSplits>
+__global__ void mfma_reduce_kernel(const float* __restrict__ partial, int64_t total,
                                    int64_t n, const __hip_bfloat16* __restrict__ bias,
                                    __hip_bfloat16* __restrict__ out, int64_t ldy) {
+  for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < total;
+       i += int64_t(gridDim.x) * blockDim.x) {
+    float p[kSplits];
+#pragma unroll
+    for (int j = 0; j < kSplits; ++j) p[j] = partial[int64_t(j) * total + i];
+    float s = p[0];
+#pragma unroll
+    for (int j = 1; j < kSplits; ++j) s += p[j];
+    if (bias != nullptr) s += __bfloat162float(bias[i % n]);
+    out[(i / n) * ldy + i % n] = __float2bfloat16(s);
+  }
+}
+
+// Fallback for a split count that is not one of the instantiated powers of two.
+__global__ void mfma_reduce_kernel_dyn(const float* __restrict__ partial, int64_t total, int splits,
+                                       int64_t n, const __hip_bfloat16* __restrict__ bias,
+                                       __hip_bfloat16* __restrict__ out, int64_t ldy) {
   for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < total;
        i += int64_t(gridDim.x) * blockDim.x) {
     float s = partial[i];
@@ -619,8 +642,25 @@ hipError_t linear_launch(const uint8_t* packed, const uint4* escapes, uint32_t e
     constexpr int kReduceThreads = 256;
     int64_t blocks = (total + kReduceThreads - 1) / kReduceThreads;
     if (blocks > kMaxGridX) blocks = kMaxGridX;
-    mfma_reduce_kernel<<<static_cast<unsigned>(blocks), kReduceThreads, 0, stream>>>(
-        partial, total, plan.kSplits, n, bb, yb, ldy);
+    const unsigned nb = static_cast<unsigned>(blocks);
+    switch (plan.kSplits) {
+      case 2:
+        mfma_reduce_kernel<2><<<nb, kReduceThreads, 0, stream>>>(partial, total, n, bb, yb, ldy);
+        break;
+      case 4:
+        mfma_reduce_kernel<4><<<nb, kReduceThreads, 0, stream>>>(partial, total, n, bb, yb, ldy);
+        break;
+      case 8:
+        mfma_reduce_kernel<8><<<nb, kReduceThreads, 0, stream>>>(partial, total, n, bb, yb, ldy);
+        break;
+      case 16:
+        mfma_reduce_kernel<16><<<nb, kReduceThreads, 0, stream>>>(partial, total, n, bb, yb, ldy);
+        break;
+      default:
+        mfma_reduce_kernel_dyn<<<nb, kReduceThreads, 0, stream>>>(
+            partial, total, plan.kSplits, n, bb, yb, ldy);
+        break;
+    }
   }
   return hipGetLastError();
 }
