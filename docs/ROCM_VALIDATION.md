@@ -9,8 +9,13 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 634 | 12 | 1 |
+| HIP + shared API | R9700 | 641 | 12 | 1 |
 | Shared API | RTX 4090 | 553 | 16 | 1 |
+
+The 641-case full HIP run was on `8e1835a`; head `40761fe` adds three
+out-of-range workspace-query cases, all covered by the latest-head focused
+run (10 native align tests and 19 shared align tests passed). CUDA runtime code
+is unchanged since its full run; the CUDA-only build still configures.
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
 with two visible GPUs to exercise concurrent device/stream propagation. The
@@ -86,9 +91,9 @@ context. All three confirmed findings are fixed:
   All 1581056 output elements match the NF12 C-API twin bitwise; all outputs
   are finite and guards are unchanged.
 
-The current PR suites above passed in 27.17 s (HIP) and 22.07 s (CUDA), with
-GIL disabled and two visible devices. The benchmark/device selection fix does
-not establish new performance numbers for the canonical shape grid.
+The latest full HIP run took 469.64 s while this host ran other work; the
+earlier full CUDA run took 22.07 s. Both used GIL-disabled Python and two
+visible devices. These are test wall times, not kernel benchmarks.
 
 A separate integration checkout at `8f31489` applied PR #7's test-only correction
 while loading the same native sources (before the additional graph tests). With GIL=0
