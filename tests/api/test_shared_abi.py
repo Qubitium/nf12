@@ -243,3 +243,17 @@ def test_grouped_operands_without_gather_leaves_output_untouched(abi):
     torch.cuda.synchronize()
     assert int((out != 7).sum()) == 0
     assert ends.tolist() == [2, 2]
+
+
+@pytest.mark.parametrize("ldx,ldo,count", [(0, 8, 4), (8, 0, 4), (8, 8, -1), (2**62, 8, 4)])
+def test_grouped_operands_rejects_invalid_buffers(abi, ldx, ldo, count):
+    x = torch.ones((4, 8), device="cuda", dtype=torch.bfloat16)
+    out = torch.full_like(x, -7.)
+    gather = torch.arange(4, device="cuda", dtype=torch.int32)
+    offsets = torch.tensor([0, 2, 4], device="cuda", dtype=torch.int64)
+    ends = torch.full((2,), -7, device="cuda", dtype=torch.int32)
+    args = (x.data_ptr(), ldx, gather.data_ptr(), 1, offsets.data_ptr(), count, 2, 8,
+            out.data_ptr(), ldo, ends.data_ptr(), _stream())
+    assert abi.nf12_moe_grouped_operands(*args) == 1
+    torch.cuda.synchronize()
+    assert bool((out == -7).all()) and bool((ends == -7).all())

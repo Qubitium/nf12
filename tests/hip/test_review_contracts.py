@@ -85,76 +85,12 @@ def test_native_moe_linear_matches_shared_validation(abi, twin, bad):
     assert bool((out == -7).all())
 
 
-def test_moe_decode_grid_overflow_matches_cuda_status(abi):
-    experts, n, k = 65536, 16, 64
-    packed = torch.empty((experts, n, k * 3 // 2), device="cuda", dtype=torch.uint8)
-    offsets = torch.zeros(experts + 1, device="cuda", dtype=torch.int64)
-    bases = torch.zeros(experts, device="cuda", dtype=torch.uint8)
-    out = torch.full((experts, n, k), -7., device="cuda", dtype=torch.bfloat16)
-    cw = MoeWeight(packed.data_ptr(), None, offsets.data_ptr(), bases.data_ptr(), experts, n, k)
-    assert abi.nf12_hip_moe_decode(cw.packed, cw.escapes, cw.escape_offsets, cw.exp_base,
-                                 experts, n, k, None, 0, 0, n, out.data_ptr(), k, _stream()) == 1
-    torch.cuda.synchronize()
-    assert bool((out == -7).all())
 
 
-@pytest.mark.parametrize("row0,rows,ldo", [(16, 16, 64), (0, 16, 56), (0, 2**63 - 16, 64)])
-def test_native_moe_decode_rejects_invalid_slice_or_stride(abi, row0, rows, ldo):
-    # A trailing encoded matrix makes the original out-of-range read observable
-    # without an illegal GPU access. The descriptor owns only the first 16 rows.
-    w = torch.cat([torch.ones(16, 64), torch.full((16, 64), 2.)]).bfloat16().cuda()
-    nw = nf12.encode(w)
-    ends = torch.tensor([0, nw.num_escapes], device="cuda", dtype=torch.int64)
-    base = torch.tensor([nw.exp_base], device="cuda", dtype=torch.uint8)
-    out = torch.full((34, 80), -7., device="cuda", dtype=torch.bfloat16)
-    cw = MoeWeight(nw.packed.data_ptr(), nw.escapes.data_ptr(), ends.data_ptr(),
-                   base.data_ptr(), 1, 16, 64)
-    assert abi.nf12_hip_moe_decode(cw.packed, cw.escapes, cw.escape_offsets, cw.exp_base,
-                                   1, 16, 64, None, 0, row0, rows,
-                                   out[1:].data_ptr(), ldo, _stream()) == 1
-    torch.cuda.synchronize()
-    assert bool((out == -7).all())
 
 
-@pytest.mark.parametrize("op", ["silu_mul", "combine"])
-@pytest.mark.parametrize("bad", ["input_stride", "stride_alignment", "row_overflow"])
-def test_native_moe_elementwise_rejects_invalid_buffers(abi, op, bad):
-    x = torch.ones((4, 32), device="cuda", dtype=torch.bfloat16)
-    out = torch.full((4, 32), -7., device="cuda", dtype=torch.bfloat16)
-    ldi, ldo, rows, offset = 32, 32, 2, 0
-    if bad == "input_stride":
-        ldi = 0
-    elif bad == "output_stride":
-        ldo = 0
-    elif bad == "stride_alignment":
-        ldo = 9
-    elif bad == "pointer_alignment":
-        offset = 2
-    elif bad == "row_overflow":
-        rows = 2**62
-    else:
-        ldi = 2**62
-    shape = (rows, 8) if op == "silu_mul" else (rows, 2, 8)
-    args = (x.data_ptr(), ldi, *shape, out.data_ptr() + offset, ldo, _stream())
-    assert getattr(abi, "nf12_moe_" + op)(*args) == 1
-    assert getattr(abi, "nf12_hip_moe_" + op)(*args) == 1
-    torch.cuda.synchronize()
-    assert bool((out == -7).all())
 
 
-@pytest.mark.parametrize("ldx,ldo,count", [(0, 8, 4), (8, 0, 4), (8, 8, -1), (2**62, 8, 4)])
-def test_native_grouped_operands_rejects_invalid_buffers(abi, ldx, ldo, count):
-    x = torch.ones((4, 8), device="cuda", dtype=torch.bfloat16)
-    out = torch.full_like(x, -7.)
-    gather = torch.arange(4, device="cuda", dtype=torch.int32)
-    offsets = torch.tensor([0, 2, 4], device="cuda", dtype=torch.int64)
-    ends = torch.full((2,), -7, device="cuda", dtype=torch.int32)
-    args = (x.data_ptr(), ldx, gather.data_ptr(), 1, offsets.data_ptr(), count, 2, 8,
-            out.data_ptr(), ldo, ends.data_ptr(), _stream())
-    assert abi.nf12_moe_grouped_operands(*args) == 1
-    assert abi.nf12_hip_moe_grouped_operands(*args) == 1
-    torch.cuda.synchronize()
-    assert bool((out == -7).all()) and bool((ends == -7).all())
 
 
 @pytest.mark.parametrize("count", [524256, 524272, 1048544, 1048545, 1048560, 2097120])

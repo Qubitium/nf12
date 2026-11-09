@@ -823,6 +823,7 @@ def test_c_combine_validation(lib):
     assert lib.nf12_moe_combine(y.data_ptr(), 60, 4, 2, 56, out.data_ptr(), 64, s) == INVALID
     assert lib.nf12_moe_combine(y.data_ptr() + 2, 64, 4, 2, 64, out.data_ptr(), 64, s) == INVALID
     assert lib.nf12_moe_combine(y.data_ptr(), 64, 4, 2, 64, out.data_ptr(), 32, s) == INVALID
+    assert lib.nf12_moe_combine(y.data_ptr(), 64, 4, 2, 64, out.data_ptr() + 2, 64, s) == INVALID
     assert lib.nf12_moe_combine(y.data_ptr(), 64, 2**62, 2, 64, out.data_ptr(), 64, s) == INVALID
     torch.cuda.synchronize()
     assert_bitwise(out, reference.moe_combine(y, 2))
