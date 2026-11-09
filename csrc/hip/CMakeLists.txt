@@ -41,11 +41,10 @@ target_include_directories(nf12_hip
 # there so the same op layer builds for both backends.
 target_compile_definitions(nf12_hip PUBLIC NF12_HIP)
 # C++ consumers of nf12.h (the torch op layer) need the HIP headers and the
-# platform macro; the HIP compiler supplies them for the .hip sources.
-get_filename_component(NF12_ROCM_ROOT "${CMAKE_HIP_COMPILER}" DIRECTORY)
-get_filename_component(NF12_ROCM_ROOT "${NF12_ROCM_ROOT}" DIRECTORY)
-target_include_directories(nf12_hip INTERFACE "${NF12_ROCM_ROOT}/include")
-target_compile_definitions(nf12_hip INTERFACE __HIP_PLATFORM_AMD__)
+# platform macro; use the runtime package rather than infer its location from
+# the compiler, which may live under either bin/ or lib/llvm/bin/.
+find_package(hip CONFIG REQUIRED HINTS "${CMAKE_HIP_COMPILER_ROCM_ROOT}")
+target_link_libraries(nf12_hip INTERFACE hip::host)
 # Land next to libnf12.so so a single directory holds either backend.
 set_target_properties(nf12_hip PROPERTIES
   HIP_ARCHITECTURES "${NF12_HIP_ARCHS}"
