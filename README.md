@@ -75,10 +75,9 @@ cmake -S . -B build/hip -G Ninja \
 cmake --build build/hip --target nf12_torch
 ```
 
-Use `-DNF12_HIP_ARCHS=gfx1200` for a `gfx1200` GPU, or drop
-`-DNF12_BUILD_TORCH=ON` to build only the C library. `nf12._jit` does the same
-configuration automatically on a ROCm host, so `import nf12` is enough for a
-source checkout.
+Use `-DNF12_HIP_ARCHS=gfx1200` for a `gfx1200` GPU. To build only the C library,
+set `-DNF12_BUILD_TORCH=OFF` and build `--target nf12_hip`. On a ROCm host,
+`nf12._jit` automatically builds both libraries from a source checkout.
 
 Fused linear kernels support batches of 1–256 tokens. For larger batches,
 the torch API decodes bounded slices and runs BF16 GEMMs; the raw C API
