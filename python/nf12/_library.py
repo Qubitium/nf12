@@ -43,10 +43,16 @@ def library_path(name: str | None = None) -> Path:
 def load() -> None:
     """Idempotently loads the torch extension (``torch.ops.nf12``) on first use."""
     global _loaded
-    # Take the lock even on the fast path. Under a free-threaded (GIL=0) build
-    # two threads can reach an unlocked `if _loaded` together; both would then
-    # call torch.ops.load_library and register the fake kernels twice, which is
-    # not idempotent. The lock is uncontended after the first call.
+    # The fast path must stay outside the lock. Dynamo cannot enter a `lock`
+    # context manager, and `torch.compile(fullgraph=True)` turns that into an
+    # error, so a compiled frame has to trace straight through the `_loaded`
+    # check. This is double-checked locking: under a free-threaded (GIL=0)
+    # build two threads can pass the outer check together, but only the first
+    # one to take the lock registers the extension; the second sees `_loaded`
+    # inside the lock and returns. Registering twice is the unsafe outcome,
+    # not entering the lock twice.
+    if _loaded:
+        return
     with _lock:
         if _loaded:
             return
