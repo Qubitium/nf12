@@ -210,7 +210,9 @@ Two deliberate choices:
   `WeightSource::{kNf12, kBf16t}` selects how a super-atom's planes become atom
   registers; decode, matrix cores and the epilogue are shared. The twin is the
   exactness reference for the nf12 route (SPEC §6.2), so it must run the same
-  arithmetic.
+  arithmetic. It now also runs the same `(tiles, splits, m_blocks)` plan, which
+  means it needs the split-K partial plane whenever the nf12 route does; the two
+  are then bitwise identical, which `tests/hip/test_torch_moe.py` asserts.
 
 `moe_linear` reuses the dense matrix-core kernel with a row map enabled
 (`kRouted`): one CTA per (expert, 16-row weight block, 16-assignment tile), the
