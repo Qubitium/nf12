@@ -2,6 +2,7 @@
 """CUDA/HIP ABI regression cases from the RDNA4 review."""
 
 import ctypes as C
+from concurrent.futures import ThreadPoolExecutor
 
 import nf12
 import pytest
@@ -34,6 +35,42 @@ def abi(lib):
         fn = getattr(lib, name)
         fn.restype, fn.argtypes = restype, args
     return lib
+
+
+@pytest.mark.parametrize("count", [524256, 524272, 1048544, 1048560])
+def test_moe_wmma_grid_y_boundary(abi, count):
+    # One expert reserves ceil(count / 16) + 1 CTAs. Cover the former
+    # 32767-block ceiling, the true 65535 ceiling, and rejection above it.
+    n, k = 16, 64
+    w = torch.ones((1, n, k), device="cuda", dtype=torch.bfloat16)
+    nw = nf12.encode_moe(w)
+    cw = MoeWeight(nw.packed.data_ptr(), nw.escapes.data_ptr(), nw.escape_offsets.data_ptr(),
+                   nw.exp_base.data_ptr(), 1, n, k)
+    x = torch.ones((count, k), device="cuda", dtype=torch.bfloat16)
+    offsets = torch.tensor([0, count], device="cuda", dtype=torch.int64)
+    guarded = torch.full((count + 2, n), -7., device="cuda", dtype=torch.bfloat16)
+    out = guarded[1:-1]
+    stream = _stream()
+
+    def launch():
+        with torch.cuda.device(x.device):
+            return abi.nf12_moe_linear(x.data_ptr(), k, None, 1, None, offsets.data_ptr(), count,
+                                      C.byref(cw), None, out.data_ptr(), n, None, 0, stream)
+
+    # Native errors intentionally persist in TLS; keep this deliberate failure
+    # off the pytest thread, as in the shared ABI error-state tests.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        rc = pool.submit(launch).result()
+    torch.cuda.synchronize()
+    if (count + 15) // 16 + 1 > 65535:
+        assert rc == 2  # NF12_ERROR_UNSUPPORTED; no launch or output writes.
+        assert bool((guarded == -7).all())
+    else:
+        assert rc == 0
+        twin = nf12.moe_linear(x, nf12.pack_bf16t_moe(w), offsets)
+        assert bool((out == k).all())  # Independent exact result for all-one inputs.
+        assert torch.equal(out.view(torch.int16), twin.view(torch.int16))
+        assert bool((guarded[[0, -1]] == -7).all())
 
 
 @pytest.mark.parametrize("offsets", [
