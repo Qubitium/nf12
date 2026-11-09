@@ -100,6 +100,20 @@ def test_native_moe_linear_matches_shared_validation(abi, twin, bad):
     assert bool((out == -7).all())
 
 
+def test_moe_decode_grid_overflow_matches_cuda_status(abi):
+    experts, n, k = 65536, 16, 64
+    packed = torch.empty((experts, n, k * 3 // 2), device="cuda", dtype=torch.uint8)
+    offsets = torch.zeros(experts + 1, device="cuda", dtype=torch.int64)
+    bases = torch.zeros(experts, device="cuda", dtype=torch.uint8)
+    out = torch.full((experts, n, k), -7., device="cuda", dtype=torch.bfloat16)
+    cw = MoeWeight(packed.data_ptr(), None, offsets.data_ptr(), bases.data_ptr(), experts, n, k)
+    assert abi.nf12_moe_decode(C.byref(cw), None, 0, 0, n, out.data_ptr(), k, _stream()) == 1
+    assert abi.nf12_hip_moe_decode(cw.packed, cw.escapes, cw.escape_offsets, cw.exp_base,
+                                 experts, n, k, None, 0, 0, n, out.data_ptr(), k, _stream()) == 1
+    torch.cuda.synchronize()
+    assert bool((out == -7).all())
+
+
 @pytest.mark.parametrize("row0,rows,ldo", [
     (16, 16, 64), (0, 32, 64), (32, 0, 64),
     (0, 16, 0), (0, 16, 56), (0, 16, 65),

@@ -115,7 +115,7 @@ cudaError_t moe_decode(const uint8_t* packed, const void* escapes, const int64_t
                        const uint8_t* base, int64_t experts, int64_t n, int64_t k,
                        const int64_t* offsets, int64_t assignments, int64_t row0, int64_t rows,
                        void* out, int64_t ldo, cudaStream_t stream) {
-  if (experts > 0xffff) return hipErrorNotSupported;
+  if (experts > 0xffff) return hipErrorInvalidValue;
   return nf12_hip_moe_decode(packed, static_cast<const uint4*>(escapes), escape_offsets, base,
       static_cast<int32_t>(experts), n, k, offsets, assignments, row0, rows, out, ldo, stream);
 }
