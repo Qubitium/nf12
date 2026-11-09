@@ -74,6 +74,12 @@ option(NF12_ENABLE_HIP "Build the RDNA4 HIP kernels (libnf12_hip.so)" ${_nf12_hi
 if(NF12_TORCH_BACKEND STREQUAL "hip" AND NOT NF12_ENABLE_HIP)
   message(FATAL_ERROR "nf12: the installed torch wheel uses ROCm; enable NF12_ENABLE_HIP")
 endif()
+if(NF12_BUILD_TORCH AND NF12_ENABLE_HIP AND NOT NF12_TORCH_BACKEND STREQUAL "hip")
+  message(FATAL_ERROR
+    "nf12: the HIP torch extension requires ROCm PyTorch in the build environment. "
+    "Build under ROCm PyTorch with --no-build-isolation, or set "
+    "NF12_BUILD_TORCH=OFF to build the HIP C library without torch.")
+endif()
 
 # CUDA is optional, and a ROCm torch wheel does not need nvcc even if it is
 # installed. NF12_CUDA_ARCHS is parsed above before CUDA is enabled.
