@@ -8,8 +8,9 @@
  * Pointers refer to device memory. Weight descriptors and analysis outputs are
  * host-resident. No function allocates device memory and the library keeps no
  * mutable device state, so calls on different streams (or from different host
- * threads) never share scratch and are independent. nf12_hip_encode_analyze
- * and nf12_hip_encode synchronize the supplied stream.
+ * threads) never share scratch and are independent. Analyze synchronizes for
+ * host metadata. Encode synchronizes to check escape capacity, then enqueues
+ * its final write; wait on the stream before reading the encoded output.
  */
 #ifndef NF12_NF12_HIP_H_
 #define NF12_NF12_HIP_H_
@@ -23,8 +24,8 @@
 extern "C" {
 #endif
 
-/* Workspace required by analyze + encode. Both synchronize the stream and
- * cannot be graph-captured. */
+/* Workspace required by analyze + encode. Both synchronize for host-side
+ * checks and cannot be graph-captured. Encode's final write is asynchronous. */
 size_t nf12_hip_encode_workspace_bytes(int64_t n, int64_t k);
 
 /* Analyze selects exp_base and counts escapes before allocation. */
