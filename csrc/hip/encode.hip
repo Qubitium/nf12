@@ -2,36 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Adapted from GPT-QModel (https://github.com/ModelCloud/GPTQModel) by Qubitium.
-// ---------------------------------------------------------------------------
-// NF12-AD (NyoomFloat12) encode for AMD RDNA4 (gfx1200 / gfx1201 / gfx1250).
-//
-// Credits: NyoomFloat12 algorithm by Liberman, Fang, Zhang, Dao and Fu
-// (Together AI, 2026), https://www.together.ai/. NF12 format, reference codec
-// and CUDA kernels by AlpinDale, https://github.com/dphnAI/nf12 (Apache-2.0).
-//
-// It is a direct transliteration of the vendored CUDA encoder
-// (gptqmodel_ext/nf12/csrc/codec/encode.cu) and produces BYTE-IDENTICAL
-// output: the same exp_base, the same packed bytes and the same escape order.
-// It replaces the pure-Torch ``nf12_codec.encode`` fallback that previously ran
-// this stage on the CPU (~691 ms for a 4096x4096 matrix).
-//
-// Port notes
-// ----------
-// The CUDA pipeline uses three CUB block primitives (BlockLoad/BlockScan/
-// BlockStore). The ROCm SDK here ships no thrust/CUB, so scan_kernel is
-// replaced by a hand-written block-wide exclusive scan with the same
-// semantics. Everything else maps 1:1:
-//
-//   analyze_kernel  -> 3 per-warp histograms -> exp_base selection
-//   count_kernel    -> per-unit escape counts
-//   scan_kernel     -> exclusive prefix sum over unit counts (hand-written)
-//   write_kernel    -> packed planes + escape table
-//
-// Numerical contract: ``exp_base`` must be chosen exactly as Python's
-// ``choose_exp_base`` (minimum escapes, ties to the SMALLEST base), and the
-// escape indices must follow flat group id order. The validator asserts
-// bytes_match / escapes_match / exp_base against the Torch oracle.
-// ---------------------------------------------------------------------------
+// NF12 encoding for RDNA4. Algorithm by Liberman, Fang, Zhang, Dao and Fu
+// (Together AI, 2026). Format and reference codec by AlpinDale (Apache-2.0).
+// Analyze chooses the smallest base with minimum escapes; count/scan/write
+// preserve the reference's packed bytes and flat-group escape order.
 #include "format_hip.cuh"
 
 #include "nf12/nf12_hip.h"
@@ -55,9 +29,12 @@ using nf12_hip::kWarpsPerBlock;
 constexpr int kHistBins = 128;  // B in [0, 120], padded
 constexpr int kNumHists = 3;    // interval starts, interval ends, sentinel collisions
 constexpr size_t kAnalyzeWorkspaceBytes = sizeof(unsigned long long) * kNumHists * kHistBins;
-constexpr int kAnalyzeSuperAtomsPerWarp = 16;
-// Fixed units make escape-index order independent of the launch grid.
-constexpr int kUnitSuperAtoms = 8;
+// Short batches expose more waves for router weights and cache-resident
+// matrices. Two-super-atom units keep neighboring warps close along K while
+// limiting the serial scan's cost on large weights. Units remain contiguous
+// in flat super-atom order, so changing their size cannot reorder escapes.
+constexpr int kAnalyzeSuperAtomsPerWarp = 4;
+constexpr int kUnitSuperAtoms = 2;
 constexpr int kScanThreads = 256;
 constexpr int kScanItemsPerThread = 8;
 constexpr int64_t kMaxGridX = 0x7fffffffLL;
@@ -71,7 +48,7 @@ int64_t num_units(int64_t num_sa) { return (num_sa + kUnitSuperAtoms - 1) / kUni
 // analyze: histogram the feasible base interval per group
 // ---------------------------------------------------------------------------
 // Per-warp histograms limit same-address atomic contention. Shared bins fit
-// 16*8*128 groups per block. Global counts need 64 bits.
+// kAnalyzeSuperAtomsPerWarp * 128 groups per warp. Global counts need 64 bits.
 __global__ void __launch_bounds__(kThreadsPerBlock)
     analyze_kernel(const __hip_bfloat16* __restrict__ w, int64_t ldw, int64_t num_sa,
                    int64_t k_blocks, unsigned long long* __restrict__ hist) {
