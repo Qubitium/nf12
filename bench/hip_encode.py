@@ -252,8 +252,8 @@ def main():
                 assert reference.pack_bf16t(w.cpu()).equal(nf12.pack_bf16t(w).cpu())
             bound = [native.bind(w, enc) for native, enc in zip(natives, encoded, strict=True)]
             metrics = {}
-            for op in public:
-                metrics['public_'+op] = paired([partial(f, w) for f in public[op]], args.warmup, args.repeats)
+            for op, implementations in public.items():
+                metrics['public_'+op] = paired([partial(f, w) for f in implementations], args.warmup, args.repeats)
             for name, idx in [('analyze_preallocated_wall', 0), ('encode_preallocated_wall', 1)]:
                 metrics[name] = paired([f[idx] for f in bound], args.warmup, args.repeats)
             for name, stage in [('analyze_gpu', 0), ('encode_gpu', 1), ('full_gpu', 2), ('bf16t_gpu', 3)]:
