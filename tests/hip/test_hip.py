@@ -290,6 +290,32 @@ def test_native_linear_matches_twin_and_dense(lib, n, k, m):
     assert _violations(got, F.linear(x, decoded).double()) == 0
 
 
+@pytest.mark.parametrize(
+    "n,k,m",
+    [
+        (4096, 4096, 16),  # four-way split
+        (4096, 4096, 64),  # two-way split
+        (2048, 4096, 16),  # eight-way split
+    ],
+)
+def test_bf16t_twin_matches_nf12_split_k_plans(lib, n, k, m):
+    """The BF16T reference must execute every reachable dense split-K plan."""
+    if lib.nf12_hip_wmma_supported(m) == 0:
+        pytest.skip(f"wmma path not available for m={m}")
+    assert lib.nf12_hip_linear_wmma_workspace_bytes(n, k, m) > 0
+
+    torch.manual_seed(m)
+    weight = (torch.randn(n, k) * 0.02).to(torch.bfloat16).cuda()
+    activations = (torch.randn(m, k) * 0.05).to(torch.bfloat16).cuda()
+    packed, escapes, exp_base = _encode(lib, weight)
+
+    actual = _linear(lib, activations, packed, escapes, exp_base)
+    expected = _twin_linear(lib, activations, weight)
+
+    assert bool(torch.isfinite(actual).all())
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
 def test_route_bounds(lib):
     assert lib.nf12_hip_wmma_max_m() >= 64
     assert lib.nf12_hip_linear_fused_small_m_supported(1) == 1

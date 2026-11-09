@@ -234,6 +234,8 @@ Two deliberate choices:
   arithmetic. It now also runs the same `(tiles, splits, m_blocks)` plan, which
   means it needs the split-K partial plane whenever the nf12 route does; the two
   are then bitwise identical, which `tests/api/test_moe.py` asserts.
+  `tests/hip/test_hip.py::test_bf16t_twin_matches_nf12_split_k_plans`
+  additionally covers the dense split-2, split-4, and split-8 plans.
 
 `moe_linear` reuses the dense matrix-core kernel with a row map enabled
 (`kRouted`): one CTA per (expert, 16-row weight block, 16-assignment tile), the
