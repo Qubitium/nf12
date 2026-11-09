@@ -325,6 +325,11 @@ def test_module_state_dict_safetensors(tmp_path):
     (1024, 64, 2048), (1025, 64, 2048),
     (512, 128, 2048), (513, 128, 2048),
     (192, 128, 4096), (193, 128, 4096),
+    # 15/17/65: the row bands either side of the 16-row matrix-core tile. The
+    # 15 case guards a real overread: a 16-row A tile formed from a shorter
+    # activation reads past the tensor and only faults when it crosses into
+    # unmapped memory (it did, on gfx942, after an unrelated shape ran first).
+    (15, 16, 64), (17, 16, 64), (65, 16, 64), (15, 4096, 4096), (65, 4096, 4096),
 ])
 def test_cuda_graph_capture_replay(m, n, k):
     nw = nf12.encode(weight(n, k))

@@ -283,6 +283,9 @@ hipError_t linear_launch(const uint8_t* packed, const uint4* escapes, uint32_t e
   if (n <= 0 || k <= 0 || n % kSuperAtomRows != 0 || k % kSuperAtomCols != 0) {
     return hipErrorInvalidValue;
   }
+  // A 16-row A tile cannot be formed below 16 tokens without reading past `x`;
+  // the caller routes that band to the fused GEMV instead.
+  if (m < 16) return hipErrorInvalidValue;
   const int64_t n_tiles = n / kSuperAtomRows;
   const int64_t n_blocks = (n_tiles + kWavesPerBlock - 1) / kWavesPerBlock;
   const int tiles = static_cast<int>((m + 15) / 16);

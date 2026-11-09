@@ -361,16 +361,12 @@ __device__ __forceinline__ void source_planes_to_atoms(
 // Selection is a compile-time query of the target ISA (`is_invocable`), not an
 // arch string and not a `__gfx*__` guard, so a host/device disagreement is
 // impossible.
-// `kNegate` is a template parameter because the RDNA4 intrinsic requires a
-// constant integer there; every call site in this port passes false.
-template <bool kNegate = false>
-__device__ __forceinline__ float dot2_bf16(__hip_bfloat162 a, __hip_bfloat162 b, float c) {
-  if (__builtin_amdgcn_is_invocable(__builtin_amdgcn_fdot2_f32_bf16)) {
-    return __builtin_amdgcn_fdot2_f32_bf16(a, b, c, kNegate);
-  }
-  const float p = __bfloat162float(a.x) * __bfloat162float(b.x) +
-                  __bfloat162float(a.y) * __bfloat162float(b.y);
-  return kNegate ? c - p : c + p;
+// Two scalar FMA-ordered products, for a device whose ISA has no packed bf16
+// dot. Same reduction order as the packed chain, so twin equality holds.
+__device__ __forceinline__ float dot2_bf16_scalar(__hip_bfloat162 a, __hip_bfloat162 b,
+                                                  float c) {
+  return c + __bfloat162float(a.x) * __bfloat162float(b.x) +
+             __bfloat162float(a.y) * __bfloat162float(b.y);
 }
 
 __device__ __forceinline__ void dot_super_atom(const AtomRegs& regs,
@@ -388,22 +384,46 @@ __device__ __forceinline__ void dot_super_atom(const AtomRegs& regs,
   const __hip_bfloat162 c56 = xp[28];
 
   // r[4*j + i] is R_i of atom j: row g uses i = 0 and 2, row g+8 uses 1 and 3.
-  lo = dot2_bf16(c0, r[0], lo);
-  lo = dot2_bf16(c8, r[2], lo);
-  hi = dot2_bf16(c0, r[1], hi);
-  hi = dot2_bf16(c8, r[3], hi);
-  lo = dot2_bf16(c16, r[4], lo);
-  lo = dot2_bf16(c24, r[6], lo);
-  hi = dot2_bf16(c16, r[5], hi);
-  hi = dot2_bf16(c24, r[7], hi);
-  lo = dot2_bf16(c32, r[8], lo);
-  lo = dot2_bf16(c40, r[10], lo);
-  hi = dot2_bf16(c32, r[9], hi);
-  hi = dot2_bf16(c40, r[11], hi);
-  lo = dot2_bf16(c48, r[12], lo);
-  lo = dot2_bf16(c56, r[14], lo);
-  hi = dot2_bf16(c48, r[13], hi);
-  hi = dot2_bf16(c56, r[15], hi);
+  //
+  // The ISA query folds at compile time, so exactly one chain is emitted:
+  // the RDNA4 packed dot verbatim (identical IR to the pre-CDNA3 file), or
+  // the same reduction order in scalar FMAs on a device without
+  // dot12-insts. No arch string decides this.
+  if (__builtin_amdgcn_is_invocable(__builtin_amdgcn_fdot2_f32_bf16)) {
+    lo = __builtin_amdgcn_fdot2_f32_bf16(c0, r[0], lo, false);
+    lo = __builtin_amdgcn_fdot2_f32_bf16(c8, r[2], lo, false);
+    hi = __builtin_amdgcn_fdot2_f32_bf16(c0, r[1], hi, false);
+    hi = __builtin_amdgcn_fdot2_f32_bf16(c8, r[3], hi, false);
+    lo = __builtin_amdgcn_fdot2_f32_bf16(c16, r[4], lo, false);
+    lo = __builtin_amdgcn_fdot2_f32_bf16(c24, r[6], lo, false);
+    hi = __builtin_amdgcn_fdot2_f32_bf16(c16, r[5], hi, false);
+    hi = __builtin_amdgcn_fdot2_f32_bf16(c24, r[7], hi, false);
+    lo = __builtin_amdgcn_fdot2_f32_bf16(c32, r[8], lo, false);
+    lo = __builtin_amdgcn_fdot2_f32_bf16(c40, r[10], lo, false);
+    hi = __builtin_amdgcn_fdot2_f32_bf16(c32, r[9], hi, false);
+    hi = __builtin_amdgcn_fdot2_f32_bf16(c40, r[11], hi, false);
+    lo = __builtin_amdgcn_fdot2_f32_bf16(c48, r[12], lo, false);
+    lo = __builtin_amdgcn_fdot2_f32_bf16(c56, r[14], lo, false);
+    hi = __builtin_amdgcn_fdot2_f32_bf16(c48, r[13], hi, false);
+    hi = __builtin_amdgcn_fdot2_f32_bf16(c56, r[15], hi, false);
+  } else {
+    lo = dot2_bf16_scalar(c0, r[0], lo);
+    lo = dot2_bf16_scalar(c8, r[2], lo);
+    hi = dot2_bf16_scalar(c0, r[1], hi);
+    hi = dot2_bf16_scalar(c8, r[3], hi);
+    lo = dot2_bf16_scalar(c16, r[4], lo);
+    lo = dot2_bf16_scalar(c24, r[6], lo);
+    hi = dot2_bf16_scalar(c16, r[5], hi);
+    hi = dot2_bf16_scalar(c24, r[7], hi);
+    lo = dot2_bf16_scalar(c32, r[8], lo);
+    lo = dot2_bf16_scalar(c40, r[10], lo);
+    hi = dot2_bf16_scalar(c32, r[9], hi);
+    hi = dot2_bf16_scalar(c40, r[11], hi);
+    lo = dot2_bf16_scalar(c48, r[12], lo);
+    lo = dot2_bf16_scalar(c56, r[14], lo);
+    hi = dot2_bf16_scalar(c48, r[13], hi);
+    hi = dot2_bf16_scalar(c56, r[15], hi);
+  }
 }
 
 

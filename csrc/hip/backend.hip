@@ -71,6 +71,14 @@ cudaError_t linear(const LinearArgs& a) {
   const bool twin = a.source == WeightSource::kBF16T;
   const nf12_hip::MatrixCore mc = linear_matrix_core(a);
   if (mc == nf12_hip::MatrixCore::kMfma) {
+    // The MFMA tile is 16 rows wide, so m < 16 would have to read a 16-row A
+    // window from a shorter tensor. The fused GEMV is exact for that band on
+    // every device (the same split the RDNA4 route uses).
+    if (a.m < 16) {
+      return nf12_hip::linear_fused_strided(a.weight, static_cast<const uint4*>(a.escapes), a.exp_base,
+                                            a.x, a.y, a.n, a.k, a.m, a.bias, a.ldx, a.ldy, twin,
+                                            a.stream);
+    }
     return nf12_hip::linear_mfma_strided(a.weight, static_cast<const uint4*>(a.escapes), a.exp_base,
                                          a.x, a.y, a.n, a.k, a.m, a.bias, a.ldx, a.ldy, twin,
                                          a.stream);
