@@ -354,8 +354,13 @@ Hardware-derived facts recorded here so they are not re-litigated:
 
   so one 8-byte load of a decoded weight row is the `B` operand for every token
   tile, which is why the decoded super-atom is staged row-major in shared
-  memory. The row stride is padded by 4 BF16 so the 16 rows land on 16 distinct
-  bank pairs (at the unpadded 64 BF16 every row started on bank 0).
+  memory. The row stride is padded by 8 BF16 to 72, which keeps every 16-byte
+  vector access to the tile naturally aligned. Padding by 4 (68) is
+  bank-perfect -- 16 rows on 16 distinct bank pairs -- but leaves the odd rows
+  8 bytes off a 16-byte boundary and splits the decode's `uint4` stores and the
+  fragment loads; measured on MI300X the aligned stride is 4-9% faster. The
+  unpadded 64 BF16 is far worse again: every row starts on bank 0, a 16-way
+  conflict.
 
 **Correctness on `gfx942`:** the full shared suite (`tests/api`) and the HIP
 suite (`tests/hip`) pass: 591 passed, 27 skipped. The nf12 and bf16t twins are

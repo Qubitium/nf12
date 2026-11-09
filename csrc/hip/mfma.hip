@@ -58,10 +58,16 @@ constexpr int64_t kMaxGridY = 0xffffLL;
 
 // One 16-column weight block decoded row-major: 16 rows x 64 BF16.
 //
-// The row stride is padded by 4 BF16 (8 bytes) so the 16 weight-row starts land
-// on 16 distinct shared-memory bank pairs. At the unpadded 64 BF16 (128 B) every
-// row started on bank 0, so each B-fragment load was a 16-way conflict.
-constexpr int kTileRowStride = kSuperAtomCols + 4;
+// The row stride must be a multiple of 8 BF16 so every 16-byte vector access to
+// the tile is naturally aligned; a stride of 68 (64 + 4) is bank-perfect but
+// leaves the odd rows 8 bytes off a 16-byte boundary, and the decode's `uint4`
+// stores plus the fragment loads then split. Padding by 8 keeps the accesses
+// whole. It costs a 2-way bank conflict (a stride that is 16-byte aligned can
+// only ever land 16 rows on 8 bank groups), and measurement says the alignment
+// is worth more: 4-9% faster than the 68 stride across the PR #3 grid.
+// At the unpadded 64 BF16 (128 B) every row started on bank 0, so each
+// B-fragment load was a 16-way conflict -- that is still much worse.
+constexpr int kTileRowStride = 72;
 
 using MfmaA = short __attribute__((ext_vector_type(4)));
 using MfmaD = float __attribute__((ext_vector_type(4)));
