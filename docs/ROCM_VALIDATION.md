@@ -316,3 +316,79 @@ Its scan stage grows from 36.1 to 137.4 µs, while total encoding improves.
 `pack_bf16t` is unchanged. Tests check all 65,536 BF16 bit patterns, scan
 boundaries, exact packed bytes and escape order, streams, graphs, and GIL=0.
 Reproduce with `bench/hip_encode.py --help`.
+
+## Encode pass order (L3 reuse)
+
+Encoding streams the weight three times (analyze, count, write). The 64 MiB
+Infinity Cache retains only the tail of the previous pass, so reading every
+pass front-to-back made each pass start on the evicted end. Counting
+back-to-front now starts where analyze finished and leaves the head resident,
+which is exactly where the write pass begins. Counts are still stored by flat
+unit id, so scan order, escape order and packed bytes are unchanged.
+
+Public `nf12.encode` wall clock, 8 warmups and 31 alternating samples per
+implementation, median, same process:
+
+| K × N | Before µs | After µs | Speedup |
+| --- | ---: | ---: | ---: |
+| 4096 × 14336 | 886.6 | 761.3 | 1.165× |
+| 14336 × 4096 | 887.8 | 758.6 | 1.170× |
+| 8192 × 8192 | 986.1 | 872.5 | 1.130× |
+| 4096 × 28672 | 1627.8 | 1510.6 | 1.078× |
+| 5120 × 25600 | 1806.0 | 1681.6 | 1.074× |
+| 25600 × 5120 | 1804.5 | 1679.3 | 1.075× |
+| 8192 × 57344 | 6071.5 | 5971.2 | 1.017× |
+| 4096 × 4096 | 220.2 | 219.9 | 1.002× |
+| 2048 × 128, 2048 × 64, 896 × 4864 | 137.6, 135.7, 158.5 | 137.8, 136.0, 158.4 | ~1.00× |
+
+The saving is a fixed 110–127 µs for weights above 64 MiB, consistent with two
+cache hits. Flushing 512 MiB of L3 before every call still measures 1.152×
+(4096 × 14336) and 1.108× (8192 × 8192), so this is not a warm-benchmark
+artifact. Kernel-only `encode_gpu` improves 1.212×/1.224×. Shapes at or below
+L3 size are unchanged, and the mandated host synchronizations still dominate
+them: at 2048 × 128 the public call is 129.3 µs against 21.3 µs of kernel time.
+
+`pack_bf16t` remains a pure byte shuffle at the copy ceiling (569–571 GB/s).
+A 16-warp variant measured 2.5–4.2% faster cold but ~10% slower on the
+L3-resident 4096 × 4096 case, so it was not adopted.
+
+## Decode occupancy and MoE decode parallelism
+
+Dense decode and `nf12_hip_unpack_bf16t` already ran at the streaming ceiling
+(560–568 GB/s against a 574 GB/s 512 MiB copy), so the remaining cost was
+occupancy. One super-atom per warp instead of two drops the kernel from 48 to
+32 VGPRs and doubles the CTA count; the arithmetic is untouched.
+
+Cold interleaved A/B, event medians:
+
+| K × N | Before µs | After µs | Change |
+| --- | ---: | ---: | ---: |
+| 896 × 4864 | 30.14 | 28.42 | +6.06% |
+| 2048 × 8192 | 105.32 | 102.06 | +3.20% |
+| 4096 × 4096 | 105.16 | 102.03 | +3.06% |
+| 14336 × 4096 | 360.28 | 350.63 | +2.75% |
+| 4096 × 14336 | 359.35 | 352.04 | +2.08% |
+| 8192 × 8192 | 411.66 | 403.27 | +2.08% |
+
+`moe_decode` was genuinely under-parallelised: its grid was (row blocks,
+experts) and each warp serially walked `k_blocks / kWarpsPerBlock` super-atoms,
+reaching only 435–496 GB/s. `blockIdx.x` now packs (row block, K slice), so each
+CTA owns a disjoint contiguous run of whole super-atoms and each warp owns one.
+Every output element is still written exactly once and there is no reduction.
+
+| E | K × N | Before µs | After µs | Change |
+| ---: | --- | ---: | ---: | ---: |
+| 4 | 14336 × 4096 | 1891.6 | 1426.6 | +32.6% |
+| 4 | 4096 × 4096 | 485.4 | 405.6 | +19.7% |
+| 8 | 4096 × 4096 | 947.6 | 818.5 | +15.8% |
+| 1 | 4096 × 4096 | 39.8 | 35.7 | +11.5% |
+| 4 | 2048 × 8192 | 424.2 | 404.3 | +4.9% |
+
+MoE decode now reaches 574–581 GB/s. The matrix-core route for m = 16..256 is
+untouched: `bench/hip_linear.py` gives a post/baseline median ratio of 1.000
+(min 0.965, max 1.040) across the shape grid, with zero correctness violations.
+A `quad_transpose` shared-store scheme for the decode-into-shared stage helped
+wide-N/large-K by up to 7% but regressed narrow-N by 12–19%, so it was not
+adopted. Both changes are bit-exact for all 65,536 BF16 patterns, for forced
+`exp_base` 0 and 120, through `pack_bf16t`/`unpack`, and for MoE decode at
+K = 4096 with sliced `row0`/`rows`.
