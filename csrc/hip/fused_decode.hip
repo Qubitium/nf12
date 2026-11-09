@@ -234,7 +234,8 @@ __global__ void __launch_bounds__(kThreads) down_kernel(DownParams p) {
   float comb = -0.0f;
   for (int j = 0; j < topk; ++j) {
     const int32_t e = p.a.ids[j];
-    if (e < 0 || int64_t{e} >= p.a.w2.experts) {
+    const bool active = e >= 0 && int64_t{e} < p.a.w2.experts;
+    if (!active) {
       // Never read activation, weights or scales for a dropped assignment, but
       // clear the plane so the previous j's partials are not reused. Adding +0
       // also leaves an all-dropped tile at +0.0, like moe_combine.
@@ -249,7 +250,13 @@ __global__ void __launch_bounds__(kThreads) down_kernel(DownParams p) {
     __syncthreads();
     if (threadIdx.x < kRows) {
       // round_assignment: scale in FP32, one BF16 rounding, add in FP32.
-      comb += __bfloat162float(__float2bfloat16(gemv_reduce(part, threadIdx.x) * p.a.scales[j]));
+      // A dropped assignment contributes +0 and must not read its router
+      // weight: the reference zero-fills that row and never scales it, and an
+      // unset scale can be NaN/Inf. Multiplying the cleared plane by it would
+      // turn an all-dropped tile into NaN instead of +0.
+      float v = gemv_reduce(part, threadIdx.x);
+      if (active) v *= p.a.scales[j];
+      comb += __bfloat162float(__float2bfloat16(v));
     }
     __syncthreads();
   }
