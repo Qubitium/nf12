@@ -299,10 +299,10 @@ model does.
 | 2048×8192 | 1.36 / 1.36 | 0.95 / 1.22 | 1.02 / 1.23 | 0.91 / 1.19 | 0.74 / 1.11 | 0.64 / 0.74 |
 | 896×4864 | 1.71 / 1.82 | 1.03 / 1.06 | 1.34 / 1.26 | 1.21 / 1.64 | 0.81 / 1.38 | 0.77 / 1.32 |
 
-Accuracy on the 60-cell grid: **0 violations** of `|err| <= 2e-3 + 2e-3*|ref|`
-against the BF16 twin, median `rms_rel` 5.5e-5 and maximum 1.5e-4 (the
-difference between two BF16 output roundings). Against the FP64 oracle the
-same runs report `rms_rel ≈ 1.66e-3`, the oracle's own BF16 floor.
+Accuracy on the 60-cell grid against dense BF16 GEMM on the exactly decoded
+weights: **0 violations** of `|err| <= 2e-3 + 2e-3*|ref|`, median `rms_rel`
+5.5e-5 and maximum 1.5e-4. Separate BF16t twin tests check the spec's exact
+bitwise contract.
 
 The win is bandwidth: NF12 reads 25% fewer weight bytes, so it pays off from
 `m=8` upward on weights large enough that the packed read dominates. Across the
