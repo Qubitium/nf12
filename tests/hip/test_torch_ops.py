@@ -77,3 +77,26 @@ def test_encode_moe_matches_reference():
     assert got.escapes.cpu().equal(ref[1].cpu())
     assert got.escape_offsets.cpu().equal(ref[2].cpu())
     assert got.exp_base.cpu().equal(ref[3].cpu())
+
+
+def test_linear_accepts_padded_input_rows():
+    """A padded row stride is a valid torch layout; the HIP op normalizes it.
+
+    The HIP kernels address x as contiguous rows, so the op must copy rather
+    than forward the padded stride. Before that copy existed, the shared
+    vector_rows() preserved the padding and the C ABI rejected the call with
+    "invalid argument".
+    """
+    torch.manual_seed(5)
+    n, k = 256, 256
+    w = (torch.randn(n, k, device="cuda") * 0.02).to(torch.bfloat16)
+    nw = nf12.encode(w)
+    storage = (torch.randn(64, k + 8, device="cuda") * 0.05).to(torch.bfloat16)
+    for m in (2, 16, 64):
+        x = storage[:m, :k]
+        assert x.stride(0) == k + 8 and not x.is_contiguous()
+        got = nf12.linear(x, nw)
+        ref = F.linear(x, w)
+        err = (got.double() - ref.double()).abs()
+        tol = 2e-3 + 2e-3 * ref.double().abs()
+        assert int(((err > tol) | ~torch.isfinite(got)).sum()) == 0, m

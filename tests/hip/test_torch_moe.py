@@ -455,3 +455,72 @@ def test_fused_moe_single_token_multi_stream_safe():
     torch.cuda.synchronize()
     for got in out:
         assert got.view(torch.int16).equal(serial.view(torch.int16))
+
+
+def test_moe_linear_never_reads_the_dropped_gather_tail():
+    """SPEC.md 9.2 leaves gather[off[E]:] unspecified; it must not be read.
+
+    A routed tail tile clamps its rows to the expert's last valid assignment.
+    Clamping to the allocation capacity instead would read the dropped tail,
+    whose value here names a row far past the activation.
+    """
+    torch.manual_seed(21)
+    e, n, k, tokens, topk = 4, 256, 512, 8, 2
+    w = _moe_weights(e, n, k, 70)
+    nw = nf12.encode_moe(w)
+    x = _bf16((tokens, k), 0.05, 71)
+    ids = torch.tensor(
+        [[0, 0], [1, -1], [-1, -1], [2, 3], [0, -1], [3, -1], [-1, -1], [1, 2]],
+        device="cuda", dtype=torch.int32,
+    )
+    sorted_ids, offsets = _align(x, ids, e)
+    valid = int(offsets[-1])
+    assert valid < sorted_ids.numel()
+    sorted_ids[valid:] = torch.iinfo(torch.int32).max
+    got = nf12.moe_linear(x, nw, offsets, gather=sorted_ids, gather_div=topk)
+    ref = reference.moe_linear(x, w, offsets, gather=sorted_ids, gather_div=topk)
+    # Positions past the valid prefix are unspecified (no zero_fill), so only
+    # the written rows are compared.
+    assert _violations(got[:valid], ref[:valid].double()) == 0
+
+
+@pytest.mark.parametrize("dropped_ids", [[0, -1], [-1, -1]])
+@pytest.mark.parametrize("bad_scale", [float("nan"), float("inf")])
+def test_fused_moe_dropped_assignment_ignores_router_scale(dropped_ids, bad_scale):
+    """A dropped assignment contributes +0 without reading its router weight.
+
+    The reference zero-fills that assignment and never scales it. Reading an
+    unset NaN/Inf scale multiplied the cleared plane and turned an all-dropped
+    tile into NaN.
+    """
+    torch.manual_seed(22)
+    e, k, inter, n = 2, 256, 128, 256
+    w13 = _bf16((e, 2 * inter, k), 0.02, 72)
+    w2 = _bf16((e, n, inter), 0.02, 73)
+    x = _bf16((1, k), 0.05, 74)
+    ids = torch.tensor([dropped_ids], device="cuda", dtype=torch.int32)
+    weights = torch.tensor([[1.0, bad_scale]], device="cuda", dtype=torch.float32)
+    w13q = nf12.encode_moe(w13)
+    w2q = nf12.encode_moe(w2)
+    got = nf12.fused_moe(x, w13q, w2q, weights, ids)
+    assert bool(got.isfinite().all())
+    ref = reference.fused_moe(x, w13, w2, weights, ids)
+    assert _violations(got, ref) == 0
+
+
+@pytest.mark.parametrize("m", [16, 32, 64, 128, 256])
+def test_linear_bf16t_is_bitwise_identical_to_nf12(m):
+    """SPEC.md 6.2: the twin runs the selected plan, so the outputs match bits.
+
+    The twin used to run a fixed eight-tile, one-K-pass configuration, which
+    could only be compared to the tuned nf12 dispatch under a tolerance.
+    """
+    torch.manual_seed(23)
+    n, k = 4096, 4096
+    w = _bf16((n, k), 0.02, 75)
+    nw = nf12.encode(w)
+    wt = nf12.pack_bf16t(w)
+    x = _bf16((m, k), 0.05, 76)
+    a = nf12.linear(x, nw)
+    b = nf12.linear_bf16t(x, wt)
+    assert a.view(torch.int16).equal(b.view(torch.int16)), m

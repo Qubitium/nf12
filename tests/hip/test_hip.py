@@ -108,6 +108,11 @@ def lib():
     lib.nf12_moe_combine.argtypes = [_VOID, _I64, _I64, _I64, _I64, _VOID, _I64, _VOID]
     lib.nf12_moe_silu_mul.restype = _INT
     lib.nf12_moe_silu_mul.argtypes = [_VOID, _I64, _I64, _I64, _VOID, _I64, _VOID]
+    lib.nf12_moe_grouped_operands.restype = _INT
+    lib.nf12_moe_grouped_operands.argtypes = [
+        _VOID, _I64, _VOID, _I64, _VOID, _I64, _I64, _I64, _VOID, _I64,
+        _VOID, _VOID,
+    ]
     lib.nf12_packed_bytes.restype = _SIZE
     lib.nf12_packed_bytes.argtypes = [_I64, _I64]
     lib.nf12_bf16t_bytes.restype = _SIZE
@@ -466,3 +471,73 @@ def test_wmma_bias_is_added_once(lib, m):
     assert abs(delta - 0.125) <= 2e-3, f"bias scaled by {delta / 0.125:.3f}x"
     ref = x.double() @ w.double().t() + 0.125
     assert _violations(_linear(lib, x, packed, escapes, exp_base, bias), ref) == 0
+
+
+def test_encode_rejects_undersized_workspace(lib):
+    """The native encoder must not write a workspace it was not given room for."""
+    torch.manual_seed(40)
+    w = (torch.randn(16, 64, device="cuda") * 0.02).to(torch.bfloat16)
+    need = int(lib.nf12_hip_encode_workspace_bytes(16, 64))
+    assert need > 0
+    ws = torch.full((need,), 0xA5, dtype=torch.uint8, device="cuda")
+    exp_base, num_escapes = _U8(0), _U32(0)
+    for declared in (0, need - 1):
+        rc = lib.nf12_hip_encode_analyze(
+            w.data_ptr(), 16, 64, 64, ws.data_ptr(), declared,
+            ctypes.byref(exp_base), ctypes.byref(num_escapes), _stream(),
+        )
+        torch.cuda.synchronize()
+        assert rc != 0, declared
+    # Nothing was written: the buffer still holds its sentinel everywhere.
+    assert int((ws != 0xA5).sum()) == 0
+
+
+def test_grouped_operands_without_gather_leaves_output_untouched(lib):
+    """The no-gather form publishes group ends and copies nothing, like CUDA."""
+    n_experts, k = 2, 8
+    x = torch.ones((2, k), dtype=torch.bfloat16, device="cuda")
+    out = torch.full_like(x, 7.0)
+    offsets = torch.tensor([0, 2], dtype=torch.int64, device="cuda")
+    ends = torch.full((n_experts,), -1, dtype=torch.int32, device="cuda")
+    rc = lib.nf12_moe_grouped_operands(
+        x.data_ptr(), k, None, 1, offsets.data_ptr(), 2, n_experts, k,
+        out.data_ptr(), k, ends.data_ptr(), _stream(),
+    )
+    torch.cuda.synchronize()
+    assert rc == 0
+    assert int((out != 7).sum()) == 0
+    assert ends.tolist() == [2, 2]
+
+
+def test_c_abi_linear_large_m_is_supported(lib):
+    """m above the matrix-core cap keeps working through the chunked route."""
+    torch.manual_seed(41)
+    n, k, m = 16, 64, 512
+    w = (torch.randn(n, k, device="cuda") * 0.02).to(torch.bfloat16)
+    packed, escapes, exp_base = _encode(lib, w)
+    x = (torch.randn(m, k, device="cuda") * 0.05).to(torch.bfloat16)
+    out = torch.full((m, n), -7.0, dtype=torch.bfloat16, device="cuda")
+    weight = _Nf12Weight(packed.data_ptr(), escapes.data_ptr(), escapes.shape[0], n, k, exp_base)
+    ws_bytes = int(lib.nf12_linear_workspace_bytes(m, n, k, 0))
+    ws = torch.empty(max(ws_bytes, 1), dtype=torch.uint8, device="cuda")
+    rc = lib.nf12_linear(
+        x.data_ptr(), m, k, ctypes.byref(weight), None, out.data_ptr(), n,
+        ws.data_ptr(), ws_bytes, _stream(),
+    )
+    torch.cuda.synchronize()
+    assert rc == 0
+    assert int((out == -7.0).sum()) == 0
+    assert _violations(out, x.double() @ w.double().t()) == 0
+
+
+def test_wmma_bf16t_twin_accepts_large_m(lib):
+    """The twin chunks the M axis above the matrix-core cap."""
+    torch.manual_seed(42)
+    n, k, cap = 256, 256, 256
+    w = (torch.randn(n, k, device="cuda") * 0.02).to(torch.bfloat16)
+    wt = nf12.pack_bf16t(w)
+    x = (torch.randn(2 * cap, k, device="cuda") * 0.05).to(torch.bfloat16)
+    got = nf12.linear_bf16t(x, wt)
+    top = nf12.linear_bf16t(x[:cap], wt)
+    bottom = nf12.linear_bf16t(x[cap:], wt)
+    assert got.view(torch.int16).equal(torch.cat([top, bottom]).view(torch.int16))
