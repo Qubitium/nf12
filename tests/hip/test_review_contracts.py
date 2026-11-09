@@ -108,3 +108,16 @@ def test_empty_moe_align_needs_no_workspace(abi, experts, topk):
     assert sorted_ids.shape == (0,)
     assert offsets.shape == (experts + 1,)
     assert bool((offsets == 0).all())
+
+
+@pytest.mark.parametrize("m", [0, 1, 16])
+def test_bf16t_rejects_misaligned_bias_before_writing(abi, m):
+    n, k = 16, 64
+    w = torch.ones((n, k), device="cuda", dtype=torch.bfloat16)
+    twin = nf12.pack_bf16t(w)
+    x = torch.ones((max(m, 1), k), device="cuda", dtype=torch.bfloat16)
+    out = torch.full((max(m, 1), n), -7., device="cuda", dtype=torch.bfloat16)
+    bias = torch.zeros(n + 8, device="cuda", dtype=torch.bfloat16)[1:1 + n]
+    assert abi.nf12_linear_bf16t(x.data_ptr(), m, k, twin.data_ptr(), n, k,
+                                bias.data_ptr(), out.data_ptr(), n, None, 0, _stream()) == 1
+    assert bool((out == -7).all())

@@ -195,6 +195,7 @@ nf12_status_t nf12_linear_bf16t(const void* x_bf16, int64_t m, int64_t ldx, cons
                                 int64_t ldy, void* workspace, size_t workspace_bytes,
                                 cudaStream_t stream) {
   if (!valid_shape(n, k) || w_bf16t == nullptr || !aligned16(w_bf16t) || m < 0 ||
+      (bias_bf16 != nullptr && !aligned16(bias_bf16)) ||
       !valid_workspace(workspace, workspace_bytes)) {
     return NF12_ERROR_INVALID_ARGUMENT;
   }
