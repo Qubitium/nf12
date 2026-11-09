@@ -514,7 +514,7 @@ def test_grouped_operands_without_gather_leaves_output_untouched(lib):
     n_experts, k = 2, 8
     x = torch.ones((2, k), dtype=torch.bfloat16, device="cuda")
     out = torch.full_like(x, 7.0)
-    offsets = torch.tensor([0, 2], dtype=torch.int64, device="cuda")
+    offsets = torch.tensor([0, 2, 2], dtype=torch.int64, device="cuda")
     ends = torch.full((n_experts,), -1, dtype=torch.int32, device="cuda")
     rc = lib.nf12_moe_grouped_operands(
         x.data_ptr(), k, None, 1, offsets.data_ptr(), 2, n_experts, k,
