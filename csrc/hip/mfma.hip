@@ -730,14 +730,18 @@ hipError_t moe_launch(const uint8_t* packed, const uint4* escapes, const int64_t
 // small. The warp-partial plane is sized for the tokens actually in flight
 // instead of being padded, because sixteen groups cannot afford the padding.
 constexpr int kSmallWarps = 16;
+// Short-K shapes cannot fill sixteen warps: k = 896 is 14 super-atoms, so one
+// block per warp leaves the prefetch with nothing to overlap and the load
+// latency is exposed in full. Eight warps give two blocks each instead.
+constexpr int kSmallWarpsShort = 8;
 
-template <WeightSource S, int kM>
-__global__ void __launch_bounds__(kSmallWarps * kWarpSize)
+template <WeightSource S, int kM, int kWarps>
+__global__ void __launch_bounds__(kWarps * kWarpSize)
     linear_small_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
                         const uint4* __restrict__ escapes, uint32_t base_x4, int64_t k, int64_t m,
                         int64_t ldx, int64_t ldy, __hip_bfloat16* __restrict__ out,
                         const __hip_bfloat16* __restrict__ bias) {
-  __shared__ float part[kSmallWarps][kM][kSuperAtomRows];
+  __shared__ float part[kWarps][kM][kSuperAtomRows];
 
   const int lane = threadIdx.x % kWarpSize;
   const int warp = threadIdx.x / kWarpSize;
@@ -748,13 +752,13 @@ __global__ void __launch_bounds__(kSmallWarps * kWarpSize)
   const int64_t k_blocks = k / kSuperAtomCols;
 
   // Contiguous, equal K slices; the last group takes any remainder.
-  const int64_t kb_per = (k_blocks + kSmallWarps - 1) / kSmallWarps;
+  const int64_t kb_per = (k_blocks + kWarps - 1) / kWarps;
   const int64_t kb_begin = int64_t(warp) * kb_per;
   int64_t kb_end = kb_begin + kb_per;
   if (kb_end > k_blocks) kb_end = k_blocks;
 
-  for (int64_t idx = threadIdx.x; idx < kSmallWarps * kM * kSuperAtomRows;
-       idx += kSmallWarps * kWarpSize) {
+  for (int64_t idx = threadIdx.x; idx < kWarps * kM * kSuperAtomRows;
+       idx += kWarps * kWarpSize) {
     (&part[0][0][0])[idx] = 0.0f;
   }
   __syncthreads();
@@ -806,12 +810,12 @@ __global__ void __launch_bounds__(kSmallWarps * kWarpSize)
 
   // Sum the group partials in fixed order so the result is deterministic.
   const int64_t total = m * kSuperAtomRows;
-  for (int64_t idx = threadIdx.x; idx < total; idx += kSmallWarps * kWarpSize) {
+  for (int64_t idx = threadIdx.x; idx < total; idx += kWarps * kWarpSize) {
     const int64_t mi = idx / kSuperAtomRows;
     const int64_t row = idx % kSuperAtomRows;
     float sum = 0.0f;
 #pragma unroll
-    for (int w = 0; w < kSmallWarps; ++w) sum += part[w][mi][row];
+    for (int w = 0; w < kWarps; ++w) sum += part[w][mi][row];
     if (bias != nullptr) sum += __bfloat162float(bias[n0 + row]);
     out[mi * ldy + n0 + row] = __float2bfloat16(sum);
   }
@@ -831,12 +835,27 @@ hipError_t linear_small_launch(const uint8_t* packed, const uint4* escapes, uint
 
   // The token count is a template parameter so the accumulators and the
   // warp-partial plane stay compile-time sized.
-#define NF12_SMALL_LAUNCH(K)                                                                 \
-  linear_small_kernel<S, K><<<static_cast<unsigned>(blocks), kSmallWarps * kWarpSize, 0,     \
-                              stream>>>(                                                     \
-      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),    \
-      escapes, exp_base_x4(exp_base), k, m, ldx, ldy,                                       \
+  //
+  // Two blocks per warp is the minimum for the plane prefetch to overlap the
+  // decode; below that sixteen warps get one block each and pay a full load
+  // latency per step, so a short-K shape runs eight. That only holds for a
+  // one- or two-tile launch, where the decode is amortised over so few MFMAs
+  // that overlapping it is worth more than the extra warps; from three tiles
+  // up the wider CTA measured faster (m = 4: 1.011x against 0.993x).
+  const int64_t k_blocks = k / kSuperAtomCols;
+  const bool short_k = k_blocks < 2 * kSmallWarps;
+#define NF12_SMALL_LAUNCH_W(K, W)                                                          \
+  linear_small_kernel<S, K, W><<<static_cast<unsigned>(blocks), W * kWarpSize, 0, stream>>>( \
+      reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),      \
+      escapes, exp_base_x4(exp_base), k, m, ldx, ldy,                                         \
       reinterpret_cast<__hip_bfloat16*>(out), reinterpret_cast<const __hip_bfloat16*>(bias))
+#define NF12_SMALL_LAUNCH(K)                                        \
+  do {                                                              \
+    if (short_k && (K) <= 2)                                        \
+      NF12_SMALL_LAUNCH_W(K, kSmallWarpsShort);                     \
+    else                                                            \
+      NF12_SMALL_LAUNCH_W(K, kSmallWarps);                          \
+  } while (0)
   // Only the tile counts that register-allocate cleanly are instantiated. Odd
   // counts from 7 up spill the accumulator array and run two orders of
   // magnitude slower, so a short token count rounds up to the next one that
@@ -853,6 +872,7 @@ hipError_t linear_small_launch(const uint8_t* packed, const uint4* escapes, uint
     default: NF12_SMALL_LAUNCH(16); break;
   }
 #undef NF12_SMALL_LAUNCH
+#undef NF12_SMALL_LAUNCH_W
   return hipGetLastError();
 }
 
