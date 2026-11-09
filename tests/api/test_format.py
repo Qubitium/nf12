@@ -620,8 +620,8 @@ def _nvcc():
 @pytest.fixture(scope="module")
 def device_decoder(tmp_path_factory):
     nvcc = _nvcc()
-    if nvcc is None or not torch.cuda.is_available():
-        pytest.skip("needs nvcc and a CUDA device")
+    if torch.version.hip is not None or nvcc is None or not torch.cuda.is_available():
+        pytest.skip("CUDA format.cuh device helper requires an NVIDIA PyTorch build; HIP has tests/hip")
     d = tmp_path_factory.mktemp("nf12_device_decode")
     src = d / "decode.cu"
     src.write_text(DEVICE_DECODE_SRC)

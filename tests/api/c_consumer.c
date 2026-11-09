@@ -9,9 +9,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <cuda_runtime_api.h>
-
 #include <nf12/nf12.h>
+
+#ifdef NF12_HIP
+/* Test-owned allocation uses the active runtime; all nf12 calls are shared. */
+#define cudaMalloc hipMalloc
+#define cudaFree hipFree
+#define cudaGetDevice hipGetDevice
+#define cudaMemcpy hipMemcpy
+#define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define cudaMemsetAsync hipMemsetAsync
+#define cudaStreamCreate hipStreamCreate
+#define cudaStreamDestroy hipStreamDestroy
+#endif
 
 #define N 16
 #define K 64
