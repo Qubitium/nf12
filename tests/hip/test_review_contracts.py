@@ -60,6 +60,46 @@ def abi(lib):
     return lib
 
 
+@pytest.mark.parametrize("twin", [False, True])
+@pytest.mark.parametrize("bad", ["k_zero", "k_tail", "n_zero", "ldx", "ldy", "gather_div",
+                                "negative_count", "large_count", "packed", "x", "out", "offsets",
+                                "alignment", "empty"])
+def test_native_moe_linear_matches_shared_validation(abi, twin, bad):
+    p, i = C.c_void_p, C.c_int64
+    fn = abi.nf12_hip_moe_linear_bf16t if twin else abi.nf12_hip_moe_linear
+    fn.restype = C.c_int
+    fn.argtypes = ([p] if twin else [p] * 4) + [C.c_int32, p, i, p, i, p, p, i, p, p, i, i, i, p]
+    w = torch.ones((1, 16, 64), device="cuda", dtype=torch.bfloat16)
+    weight = nf12.pack_bf16t_moe(w) if twin else nf12.encode_moe(w)
+    packed = weight.data_ptr() if twin else weight.packed.data_ptr()
+    x = torch.ones((1, 72), device="cuda", dtype=torch.bfloat16)
+    out = torch.full((1, 16), -7., device="cuda", dtype=torch.bfloat16)
+    offsets = torch.tensor([0, 1], device="cuda", dtype=torch.int64)
+    n, k, ldx, ldy, div, count = 16, 64, 72, 16, 1, 1
+    xp, yp, off = x.data_ptr(), out.data_ptr(), offsets.data_ptr()
+    if bad == "k_zero": k = 0
+    elif bad == "k_tail": k = 65
+    elif bad == "n_zero": n = 0
+    elif bad == "ldx": ldx = 0
+    elif bad == "ldy": ldy = 0
+    elif bad == "gather_div": div = 0
+    elif bad == "negative_count": count = -1
+    elif bad == "large_count": count = 2**31
+    elif bad == "packed": packed = None
+    elif bad == "x": xp = None
+    elif bad == "out": yp = None
+    elif bad == "offsets": off = None
+    elif bad == "alignment": xp += 2
+    else:
+        count, xp, yp, off = 0, None, None, None
+    prefix = [packed] if twin else [packed, weight.escapes.data_ptr(),
+                                    weight.escape_offsets.data_ptr(), weight.exp_base.data_ptr()]
+    expected = 0 if bad == "empty" else 1
+    assert fn(*prefix, 1, xp, ldx, None, div, None, off, count, None, yp, ldy, n, k, _stream()) == expected
+    torch.cuda.synchronize()
+    assert bool((out == -7).all())
+
+
 @pytest.mark.parametrize("row0,rows,ldo", [
     (16, 16, 64), (0, 32, 64), (32, 0, 64),
     (0, 16, 0), (0, 16, 56), (0, 16, 65),

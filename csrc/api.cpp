@@ -75,15 +75,12 @@ nf12_status_t run_moe_linear(const void* x, int64_t ldx, const int32_t* gather, 
                              const int32_t* scatter, const int64_t* expert_offsets, int64_t max_assignments,
                              nf12::backend::MoeLinearArgs args, const float* row_scale, void* y, int64_t ldy,
                              void* workspace, size_t workspace_bytes, cudaStream_t stream) {
-  if (max_assignments < 0 || max_assignments > std::numeric_limits<int32_t>::max() || gather_div < 1 ||
-      !aligned(gather, 4) || !aligned(scatter, 4) || !aligned(row_scale, 4) || !aligned(expert_offsets, 8) ||
+  if (!valid_moe_linear_buffers(x, ldx, gather, gather_div, scatter, expert_offsets,
+                                max_assignments, row_scale, y, ldy, args.n, args.k) ||
       !valid_workspace(workspace, workspace_bytes)) {
     return NF12_ERROR_INVALID_ARGUMENT;
   }
   if (max_assignments == 0) return NF12_OK;
-  if (expert_offsets == nullptr || !valid_bf16_matrix(x, args.k, ldx) || !valid_bf16_matrix(y, args.n, ldy)) {
-    return NF12_ERROR_INVALID_ARGUMENT;
-  }
   int device = 0;
   if (nf12_status_t s = current_device(&device); s != NF12_OK) return s;
   if (workspace_bytes < nf12::backend::moe_linear_workspace_bytes(max_assignments, args.num_experts, args.n, args.k,

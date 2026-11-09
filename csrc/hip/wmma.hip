@@ -46,6 +46,7 @@
 // ---------------------------------------------------------------------------
 #include "format_hip.cuh"
 #include "linear.h"
+#include "../validation.h"
 
 // The launcher templates below run before the C entry points are defined, so
 // the two queries they need are declared here instead of pulling in the whole
@@ -770,10 +771,18 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
                                   const int32_t* scatter, const int64_t* expert_offsets,
                                   int64_t max_assignments, const float* row_scale, void* out,
                                   int64_t ldy, int64_t n, int64_t k, hipStream_t stream) {
-  if (!wmma_available()) return hipErrorNotSupported;
-  if (n % kSuperAtomRows != 0 || num_experts < 1 || max_assignments <= 0) {
+  using namespace nf12::validation;
+  if (!valid_moe_shape(num_experts, n, k) || packed == nullptr || !aligned16(packed) ||
+      !valid_moe_linear_buffers(x, ldx, gather, gather_div, scatter, expert_offsets,
+                                max_assignments, row_scale, out, ldy, n, k)) {
     return hipErrorInvalidValue;
   }
+  if constexpr (Src == WeightSource::kNf12) {
+    if (!aligned16(escapes) || escape_offsets == nullptr || !aligned(escape_offsets, 8) ||
+        exp_base == nullptr) return hipErrorInvalidValue;
+  }
+  if (max_assignments == 0) return hipSuccess;
+  if (!wmma_available()) return hipErrorNotSupported;
   const int64_t n_blocks = (n / kSuperAtomRows + kWarpsPerBlock - 1) / kWarpsPerBlock;
   const int64_t m_tiles = (max_assignments + 15) / 16 + num_experts;
   if (n_blocks == 0) return hipSuccess;
