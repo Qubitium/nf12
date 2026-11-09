@@ -9,7 +9,7 @@ OMP/MKL threads were limited to one. Libraries were built from source.
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 647 | 12 | 1 |
+| HIP + shared API | R9700 | 692 | 12 | 1 |
 | Shared API | RTX 4090 | 447 | 13 | 1 |
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
@@ -27,7 +27,7 @@ before output writes; zero-token routing on a non-default stream; padded
 strides for both packed and BF16t inputs; bias alignment; slice byte budgets;
 exact BF16 GEMM results for single- and multi-slice fallbacks; and WMMA launch
 grids above the old 32767-block ceiling. The latter admits Y up to 65535
-and rejects larger grids as unsupported before output writes.
+and now spans larger routed workloads across Y/Z (see the contract follow-up below).
 `tests/api/test_jit.py` verifies that changing `HIPFLAGS` invalidates the HIP
 build cache without affecting CUDA identity. The MoE twin test requires exact
 BF16 bit equality and finite outputs.
@@ -56,7 +56,7 @@ expert produces exactly 64 per element and matches its BF16t twin:
 | 524256 | 32767 | Success | 0 / 0 |
 | 524272 | 32768 | Success | 0 / 0 |
 | 1048544 | 65535 | Success | 0 / 0 |
-| 1048560 | 65536 | Unsupported | No output writes |
+| 1048560 | 65536 total tiles across Y/Z | Success | 0 / 0 |
 
 ### Fresh-context review
 
@@ -75,12 +75,12 @@ context. All three confirmed findings are fixed:
   All 1581056 output elements match the NF12 C-API twin bitwise; all outputs
   are finite and guards are unchanged.
 
-The current PR suites above passed in 28.25 s (HIP) and 74.53 s (CUDA), with
+The current PR suites above passed in 26.88 s (HIP) and 74.78 s (CUDA), with
 GIL disabled and two visible devices. The benchmark/device selection fix does
 not establish new performance numbers for the canonical shape grid.
 
-A separate integration checkout applied PR #7's test-only correction to the
-current tests while loading these same source-built libraries. With GIL=0
+A separate integration checkout at `8f31489` applied PR #7's test-only correction
+while loading the same native sources (before the additional graph tests). With GIL=0
 and two GPUs, the full suites passed with **zero deselections**:
 
 | Suite with PR #7 test correction | Device | Passed | Skipped | Seconds |
@@ -164,6 +164,62 @@ python -m pytest tests/hip/test_inference_graphs.py tests/api/test_torch.py \
   tests/api/test_embedding.py tests/api/test_moe.py tests/api/test_decode_route.py \
   -k graph -q
 ```
+
+## CUDA contract follow-up
+
+An independent reviewer started without prior review context at `434ff38` and
+reproduced four contract differences. Commits `317998c`, `c16e287`, `edb7af4`
+and `1c6e4c1` correct them individually. The reviewer rechecked the arithmetic,
+routed indexing and native validation; the shared/native regression also
+verifies the corrected adapter's error category.
+
+| Contract case | Before | Fixed |
+| --- | --- | --- |
+| Cancelling split-K dot product, bias 1 | 0 | 1, exact |
+| Cancelling split-K dot product, bias 2^-25 | 0 | 2^-25, exact |
+| Finite cancelling dot product, bias 2^127 | Infinity | 2^127, finite and exact |
+| MoE with 1048545 through 2097120 assignments | Unsupported above Y limit | Correct outputs; zero changed guards |
+| Native MoE K=0 or K=65 | Success, truncated computation | Invalid argument, no writes |
+| Native MoE empty work | Invalid argument | Success, no writes |
+| Shared MoE decode E=65536 | Unsupported (2) | Invalid argument (1), matching CUDA |
+
+Bias joins the complete FP32 reduction before BF16 rounding. Both NF12 and
+BF16t previously shared the incorrect early-bias epilogue, so twin equality
+alone could not detect it. Regression expectations use exactly cancelling
+products and their analytically known bias, without relaxing tolerances.
+The shared C frontend and native HIP launcher now reuse the buffer validator.
+Routed tiles extend into grid.z while processing all K; dense split-K retains
+its separate Z interpretation. Boundary graph replay also passes.
+
+After these changes, the suites at the top of this report pass with GIL disabled.
+The unchanged PR #7 reference-tolerance case remains explicitly deselected.
+The C99 consumers and descriptor-layout checks pass on both backends. Before
+these repairs, direct fingerprints matched all 25 shared C symbols, 14 torch
+schemas and eight status-string cases; no signatures or schemas changed.
+
+### Contract-fix timing
+
+R9700 gfx1201; old `434ff38` library and repaired library in one process,
+interleaved order. Twenty warmups, 101 host-call samples, 21 GPU samples with
+32 native calls per captured graph; warm resident weights, median microseconds.
+These eight cells are a targeted regression check, not the full shape grid.
+
+| Operation | Shape | Host before | Host after | GPU before | GPU after |
+| --- | --- | ---: | ---: | ---: | ---: |
+| dense | M=16,N=256,K=2048 | 4.787 | 4.807 | 8.102 | 8.207 |
+| dense+bias | M=16,N=256,K=2048 | 5.097 | 5.067 | 8.295 | 8.390 |
+| dense | M=16,N=4096,K=4096 | 4.927 | 4.998 | 22.301 | 22.336 |
+| dense+bias | M=16,N=4096,K=4096 | 5.178 | 5.288 | 21.361 | 21.537 |
+| dense | M=64,N=4096,K=4096 | 4.937 | 4.937 | 35.895 | 36.197 |
+| dense+bias | M=64,N=4096,K=4096 | 5.338 | 5.388 | 36.365 | 37.513 |
+| moe | A=16,E=4,N=128,K=512 | 4.627 | 4.617 | 10.190 | 10.369 |
+| moe | A=512,E=4,N=128,K=512 | 4.577 | 4.587 | 10.597 | 10.769 |
+
+The largest measured GPU increase is 3.16% (M=64, N=K=4096 with bias);
+maximum host increase is 0.110 us. Unbiased outputs are bitwise unchanged.
+Biased outputs can change because the previous bias ordering was incorrect;
+the largest random-data difference in this sample was 6.103515625e-5.
+No claim of universal performance parity is made.
 
 ## Large-batch fallback
 
