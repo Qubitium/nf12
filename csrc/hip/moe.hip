@@ -161,10 +161,10 @@ __global__ void __launch_bounds__(kAlignThreads)
     const int64_t a = base + lane;
     const int key = align_key(ids, a, a1, num_experts);
     // Rank equal-expert lanes by lane id, so peers keep increasing id order.
-    unsigned peers = __builtin_amdgcn_ballot_w32(key >= 0);
+    unsigned peers = nf12_hip::ballot_atom_group(key >= 0);
     for (int b = 0; b < bits; ++b) {
       const bool set = ((key >> b) & 1) != 0;
-      const unsigned ballot = __builtin_amdgcn_ballot_w32(set);
+      const unsigned ballot = nf12_hip::ballot_atom_group(set);
       peers &= set ? ballot : ~ballot;
     }
     int32_t* const slot =

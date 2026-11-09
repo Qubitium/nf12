@@ -28,6 +28,8 @@ add_library(nf12_hip SHARED
   decode.hip
   encode.hip
   wmma.hip
+  capability.hip
+  mfma.hip
   moe.hip
   fused_decode.hip
   embedding.hip

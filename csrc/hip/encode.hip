@@ -110,7 +110,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 #pragma unroll
     for (int j = 0; j < kAtomsPerSuperAtom; ++j) {
       Group g;
-      count += __popc(__builtin_amdgcn_ballot_w32(!encode_group_fast(r[j], base_x4, g)));
+      count += __popc(nf12_hip::ballot_atom_group(!encode_group_fast(r[j], base_x4, g)));
     }
   }
   if (lane == 0) unit_counts[unit] = count;
@@ -200,7 +200,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 #pragma unroll
     for (int j = 0; j < kAtomsPerSuperAtom; ++j) {
       const bool esc = !encode_group_fast(r[j], base_x4, g[j]);
-      const uint32_t ballot = __builtin_amdgcn_ballot_w32(esc);
+      const uint32_t ballot = nf12_hip::ballot_atom_group(esc);
       if (esc) {
         const uint32_t idx = next + __popc(ballot & lt_mask);
         escapes[idx] = make_uint4(r[j][0], r[j][1], r[j][2], r[j][3]);

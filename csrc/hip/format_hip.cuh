@@ -39,6 +39,7 @@
 
 #include <cstdint>
 
+#include "capability.h"
 #include "nf12/format.cuh"
 
 namespace nf12_hip {
@@ -64,12 +65,34 @@ static_assert(kSuperAtomBytes == nf12::kSuperAtomBytes);
 static_assert(kPlaneBytes == nf12::kPlaneBytes);
 static_assert(kMaxExpBase == nf12::kMaxExpBase);
 
-inline constexpr int kWarpSize = 32;
-inline constexpr int kWarpsPerBlock = 8;
-inline constexpr int kThreadsPerBlock = kWarpsPerBlock * kWarpSize;
+// Lanes that own one super-atom, and lane-groups per CTA. These are FORMAT and
+// scheduling constants, not hardware properties: a wave32 device maps one
+// group to a wave, a wave64 device maps two. The CTA is 8 groups = 256 threads
+// on both, so the RDNA4 occupancy tuning carries over unchanged and no wave
+// barrier is ever split by an early return. See capability.h.
+inline constexpr int kWarpSize = kAtomLanes;
+inline constexpr int kWarpsPerBlock = kGroupsPerBlock;
+inline constexpr int kThreadsPerBlock = kGroupsPerBlock * kAtomLanes;
 inline constexpr int kSuperAtomVecs = kSuperAtomBytes / 16;  // 96 uint4
 inline constexpr int kPlaneVecs = kPlaneBytes / 16;          // 32 uint4
 inline constexpr int kSuperAtomVecsBf16t = 2048 / 16;        // 128 uint4
+
+// Hardware wave width of the device this wave runs on. Only used where the
+// width matters (vote masks, cross-half-wave reductions); the codec kernels
+// index by the 32-lane atom group above and are width independent.
+__device__ __forceinline__ int hw_wave_size() { return static_cast<int>(warpSize); }
+
+// 32-lane ballot, valid on wave32 and wave64 targets. On wave64 the compiler
+// exposes only `ballot_w64`; the low or high half of the result is the 32-lane
+// group's mask, selected from the lane id. The value is exactly what
+// `ballot_w32` would have returned for that group.
+__device__ __forceinline__ uint32_t ballot_atom_group(bool predicate) {
+  if (__builtin_amdgcn_is_invocable(__builtin_amdgcn_ballot_w32)) {
+    return __builtin_amdgcn_ballot_w32(predicate);
+  }
+  const uint64_t full = __builtin_amdgcn_ballot_w64(predicate);
+  return static_cast<uint32_t>(full >> (32 * ((threadIdx.x & 63) / 32)));
+}
 
 // CUDA's MoE schedule clamps offsets and takes their running maximum.
 __device__ __forceinline__ int64_t moe_next_offset(int64_t offset, int64_t previous,
@@ -329,16 +352,27 @@ __device__ __forceinline__ void source_planes_to_atoms(
 //   R0 -> row g,   cols 2t, 2t+1      R1 -> row g+8, cols 2t, 2t+1
 //   R2 -> row g,   cols 2t+8, 2t+9    R3 -> row g+8, cols 2t+8, 2t+9
 //
-// Packed BF16 dot, one v_dot2_f32_bf16 per two columns. This is the RDNA4
-// counterpart of the CUDA mma bf16 path: without it the inner loop is scalar
-// FMA and the kernel is compute-bound instead of bandwidth-bound.
-// (__builtin_amdgcn_fdot2 is FP16, not BF16 -- using it here silently produced
-// garbage, so the explicit _f32_bf16 spelling matters.)
+// Packed BF16 dot: one v_dot2_f32_bf16 per two columns where the ISA has it
+// (RDNA4 `dot12-insts`), otherwise two scalar FMAs into the same accumulator.
+// The scalar form is bit-identical for a single product pair (fma of the two
+// products is not contracted here: no fast-math in this build) and keeps the
+// exact reduction order, so the twin-equality contract holds on CDNA too.
 //
-// This lives in the header because both the dense fused GEMV (decode.hip) and
-// the single-token MoE path (fused_decode.hip) walk the same atoms; a second
-// copy of the 16-intrinsic chain would be the easiest place for the two routes
-// to silently diverge.
+// Selection is a compile-time query of the target ISA (`is_invocable`), not an
+// arch string and not a `__gfx*__` guard, so a host/device disagreement is
+// impossible.
+// `kNegate` is a template parameter because the RDNA4 intrinsic requires a
+// constant integer there; every call site in this port passes false.
+template <bool kNegate = false>
+__device__ __forceinline__ float dot2_bf16(__hip_bfloat162 a, __hip_bfloat162 b, float c) {
+  if (__builtin_amdgcn_is_invocable(__builtin_amdgcn_fdot2_f32_bf16)) {
+    return __builtin_amdgcn_fdot2_f32_bf16(a, b, c, kNegate);
+  }
+  const float p = __bfloat162float(a.x) * __bfloat162float(b.x) +
+                  __bfloat162float(a.y) * __bfloat162float(b.y);
+  return kNegate ? c - p : c + p;
+}
+
 __device__ __forceinline__ void dot_super_atom(const AtomRegs& regs,
                                                const __hip_bfloat162* __restrict__ xrow, int t,
                                                float& lo, float& hi) {
@@ -354,22 +388,22 @@ __device__ __forceinline__ void dot_super_atom(const AtomRegs& regs,
   const __hip_bfloat162 c56 = xp[28];
 
   // r[4*j + i] is R_i of atom j: row g uses i = 0 and 2, row g+8 uses 1 and 3.
-  lo = __builtin_amdgcn_fdot2_f32_bf16(c0, r[0], lo, false);
-  lo = __builtin_amdgcn_fdot2_f32_bf16(c8, r[2], lo, false);
-  hi = __builtin_amdgcn_fdot2_f32_bf16(c0, r[1], hi, false);
-  hi = __builtin_amdgcn_fdot2_f32_bf16(c8, r[3], hi, false);
-  lo = __builtin_amdgcn_fdot2_f32_bf16(c16, r[4], lo, false);
-  lo = __builtin_amdgcn_fdot2_f32_bf16(c24, r[6], lo, false);
-  hi = __builtin_amdgcn_fdot2_f32_bf16(c16, r[5], hi, false);
-  hi = __builtin_amdgcn_fdot2_f32_bf16(c24, r[7], hi, false);
-  lo = __builtin_amdgcn_fdot2_f32_bf16(c32, r[8], lo, false);
-  lo = __builtin_amdgcn_fdot2_f32_bf16(c40, r[10], lo, false);
-  hi = __builtin_amdgcn_fdot2_f32_bf16(c32, r[9], hi, false);
-  hi = __builtin_amdgcn_fdot2_f32_bf16(c40, r[11], hi, false);
-  lo = __builtin_amdgcn_fdot2_f32_bf16(c48, r[12], lo, false);
-  lo = __builtin_amdgcn_fdot2_f32_bf16(c56, r[14], lo, false);
-  hi = __builtin_amdgcn_fdot2_f32_bf16(c48, r[13], hi, false);
-  hi = __builtin_amdgcn_fdot2_f32_bf16(c56, r[15], hi, false);
+  lo = dot2_bf16(c0, r[0], lo);
+  lo = dot2_bf16(c8, r[2], lo);
+  hi = dot2_bf16(c0, r[1], hi);
+  hi = dot2_bf16(c8, r[3], hi);
+  lo = dot2_bf16(c16, r[4], lo);
+  lo = dot2_bf16(c24, r[6], lo);
+  hi = dot2_bf16(c16, r[5], hi);
+  hi = dot2_bf16(c24, r[7], hi);
+  lo = dot2_bf16(c32, r[8], lo);
+  lo = dot2_bf16(c40, r[10], lo);
+  hi = dot2_bf16(c32, r[9], hi);
+  hi = dot2_bf16(c40, r[11], hi);
+  lo = dot2_bf16(c48, r[12], lo);
+  lo = dot2_bf16(c56, r[14], lo);
+  hi = dot2_bf16(c48, r[13], hi);
+  hi = dot2_bf16(c56, r[15], hi);
 }
 
 

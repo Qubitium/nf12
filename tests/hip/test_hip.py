@@ -22,6 +22,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from nf12 import reference
+from _gating import MATRIX_CORE_ARCHS
 
 
 def _arch() -> str:
@@ -31,8 +32,8 @@ def _arch() -> str:
 
 
 pytestmark = pytest.mark.skipif(
-    _arch() not in ("gfx1200", "gfx1201"),
-    reason="requires an RDNA4 (gfx1200/gfx1201) ROCm device",
+    _arch() not in MATRIX_CORE_ARCHS,
+    reason="requires a matrix-core (gfx1200/gfx1201/gfx942/gfx950) ROCm device",
 )
 
 _VOID = ctypes.c_void_p

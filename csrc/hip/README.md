@@ -1,13 +1,21 @@
-# RDNA4 (gfx1200 / gfx1201) HIP kernels
+# AMD HIP kernels (RDNA4 `gfx1200`/`gfx1201`, CDNA3 `gfx942`)
 
-A HIP port of the NF12 codec and fused linear kernels for AMD RDNA4. It
-consumes and produces the **identical tiled byte stream** as the CUDA kernels,
-so a checkpoint is portable in both directions.
+A HIP port of the NF12 codec and fused linear kernels for AMD GPUs. It consumes
+and produces the **identical tiled byte stream** as the CUDA kernels, so a
+checkpoint is portable in both directions.
 
 Status: **decode, encode, the matrix-core fused path, the bf16t twin and the
 full MoE op set are implemented and validated on a Radeon AI PRO R9700
-(`gfx1201`)**, and wired into `python/nf12` / `torch.ops.nf12` — the torch
-extension builds on ROCm and shares `csrc/torch/ops.cpp` with the CUDA build.
+(`gfx1201`, RDNA4) and an Instinct MI300X (`gfx942`, CDNA3)**, and wired into
+`python/nf12` / `torch.ops.nf12` — the torch extension builds on ROCm and
+shares `csrc/torch/ops.cpp` with the CUDA build.
+
+Kernel selection is **trait-based, never an ISA-string table** (see
+`capability.h`): the dispatcher asks the device for its wave width, matrix-core
+family, CU count, XCC/chiplet count, L2 size and shared memory per CU, then
+chooses a kernel. The arch string is consulted only to *confirm* the family the
+runtime reports, so one binary built for a mixed fleet does not mis-route a
+device it did not target.
 
 Validated toolchain: **ROCm SDK 10.1.0**, **HIP 7.16.26385**
 (`hipconfig --version`: `7.16.26385-0000000`), and
@@ -19,10 +27,12 @@ ROCm release numbers and HIP component versions are distinct;
 
 | File | Contents |
 | --- | --- |
-| `format_hip.cuh` | SPEC §4 geometry, AMD `v_perm_b32` selector conversion, `decode_bulk`/`decode_group`, tiling helpers, wmma fragment helpers. |
+| `capability.{h,hip}` | Per-ordinal device traits: wave width, matrix-core family (`kWmma`/`kMfma`/`kNone`), CUs, XCCs, L2, smem, clock, HBM. The only dispatch input. |
+| `format_hip.cuh` | SPEC §4 geometry, AMD `v_perm_b32` selector conversion, `decode_bulk`/`decode_group`, tiling helpers, wmma fragment helpers, 32-lane `ballot_atom_group` and ISA-selected `dot2_bf16`. |
 | `decode.hip` | `nf12_hip_decode` (NF12 → exact BF16), `nf12_hip_linear_fused` (small-M fused decode+GEMM; the dispatcher uses it for `m <= 15` and sends `m = 16` to the matrix-core path), `nf12_hip_selftest`. |
 | `encode.hip` | Native analyze/count/scan/write encoder (`nf12_hip_encode_workspace_bytes`, `nf12_hip_encode_analyze`, `nf12_hip_encode`). |
-| `wmma.hip` | `nf12_hip_linear_wmma` (matrix cores, `16 <= m <= 256`), `nf12_hip_linear_wmma_bf16t`, and the routed `nf12_hip_moe_linear{,_bf16t}`. |
+| `wmma.hip` | `nf12_hip_linear_wmma` (RDNA4 matrix cores, `16 <= m <= 256`), `nf12_hip_linear_wmma_bf16t`, and the routed `nf12_hip_moe_linear{,_bf16t}`. |
+| `mfma.hip` | CDNA3 decode + fused GEMM on `v_mfma_f32_16x16x16bf16` (gfx90a-insts): dense `linear_mfma_strided` and routed `moe_linear_mfma`, the exact bf16t twin and the C-API route on `gfx942`/`gfx950`. |
 | `moe.hip` | `moe_align` (stable counting sort), `moe_combine`, `moe_silu_mul`, `moe_decode`, `moe_grouped_operands`. |
 | `fused_decode.hip` | The `nf12::torch_detail::fused_decode` seam for `_fused_moe` at `T == 1` (gate/SiLU and down/combine in two launches), so the torch op layer and the C ABI are identical on both backends. |
 | `embedding.hip` | `nf12_hip_embedding` for int32/int64 ids (bit-exact vs CUDA). |
@@ -137,15 +147,46 @@ both results; a per-stream arena would need a lifecycle, because serving loops
 create and destroy streams; and `hipMallocAsync`/`hipFreeAsync` around each
 launch measured ~11 µs of host time, more than the split saves.
 
-Route selection by token count: `m <= 15` uses the fused small-M kernel,
-`16 <= m <= 256` the matrix-core path, and larger `m` falls back to
-decode-then-rocBLAS in the torch layer. Decoded slices follow CUDA's 256 MiB
-external-buffer budget (at least one 16-row tile), with storage local to the
-current call. The raw C API uses native M chunks and a caller-owned workspace.
-`m=16` is a single 16-token tile and is faster than the
-fused kernel on every measured shape. `gfx1250` has no `wmma-128b-insts`;
-`wmma.hip` compiles to an empty translation unit there and
-`nf12_hip_wmma_supported` returns 0.
+Route selection is a **device trait**, not an ISA check (`backend.hip`,
+`linear_decode_gemm_rows`). The trait record is probed once per ordinal in
+`capability.hip` and cached:
+
+| trait | RDNA4 `gfx1201` | CDNA3 `gfx942` |
+| --- | --- | --- |
+| `wave_size` | 32 | 64 |
+| `matrix` | `kWmma` | `kMfma` |
+| `packed_dot` | true (`v_dot2_f32_bf16`, dot12-insts) | false (scalar FMA fallback, bit-identical) |
+| `compute_units` | 32 | 304 |
+| `xccs` | 1 | 8 |
+| `l2_bytes` | 64 MiB | 4 MiB |
+
+* **`m <= 15`** — the fused decode+GEMM GEMV kernel (`decode.hip`), on every
+  device.
+* **RDNA4 `kWmma`** — native `v_wmma` matrix cores for `16 <= m <= 256`; larger
+  `m` falls back to decode-then-rocBLAS in the torch layer.
+* **CDNA3 `kMfma`** — the fused `v_mfma` kernel (`mfma.hip`) serves the
+  small-M band `16 <= m <= 64`. That band is fixed by the shared API contract
+  (SPEC §6.5: `nf12_linear_decode_gemm_rows(m, n, k) == 0` for `m ∈ {1,16,64}`
+  on any device), not by a speed comparison — on this part even a full decode
+  plus rocBLAS is quicker at those sizes, but the answer must not depend on
+  which device the query runs on. Above the band the fused MFMA GEMM is
+  bandwidth-bound on the activation re-read (each 16-column stripe re-reads all
+  of `x`), so the trait's CU/XCC scale makes decode-once + rocBLAS the native
+  route — the same 256 MiB sliced decode the CUDA build uses. Measured at
+  parity with the hand-written fused kernel's rocBLAS reference (ratio
+  0.93–1.05×) instead of the 13–18× deficit the fused kernel showed there.
+* **`kNone`** — no matrix core: `m < 16` stays on the fused kernel, everything
+  above decodes first (`gfx1250` has no `wmma-128b-insts`; `wmma.hip` compiles
+  to an empty translation unit and `nf12_hip_wmma_supported` returns 0).
+
+The fused MFMA kernel is kept because it is the only route on the raw C ABI
+for a device whose rocBLAS the caller does not control, and because it is the
+exact bf16t twin the SPEC §6.2 bit-equality contract is defined against.
+
+Decoded slices follow CUDA's 256 MiB external-buffer budget (at least one
+16-row tile), with storage local to the current call. The raw C API uses native
+M chunks and a caller-owned workspace. `m=16` is a single 16-token tile and is
+faster than the fused kernel on every measured shape.
 
 ## torch extension on ROCm
 
@@ -227,7 +268,11 @@ Two deliberate choices:
 
 * **No `aten::_grouped_mm` dependency.** `nf12_moe_linear_decode_gemm_rows`
   returns 0, so the decode + grouped-GEMM shortcut is never selected and MoE
-  never needs a ROCm grouped GEMM.
+  never needs a ROCm grouped GEMM. On this ROCm build that shortcut would also
+  be unusable: `_grouped_mm` stages its `offs` argument through an unpinned
+  host tensor, so it raises under CUDA graph capture
+  (`tests/api/test_decode_route.py::test_moe_route_graph_capture`). The fused
+  routed kernel needs no workspace and is capturable.
 * **The bf16t twin is a template parameter, not a second kernel.**
   `WeightSource::{kNf12, kBf16t}` selects how a super-atom's planes become atom
   registers; decode, matrix cores and the epilogue are shared. The twin is the
@@ -278,6 +323,65 @@ follow-up, and it is why the MoE GEMM is not claimed to be tensor-core optimal.
 
 See [ROCm validation and performance](../../docs/ROCM_VALIDATION.md) for
 review regression coverage, fallback timings and encoder measurements.
+
+## Validation on CDNA3 (MI300X, `gfx942`, 304 CUs, 8 XCCs, wave64)
+
+The port was extended to CDNA3 with **no changes to the format, the ABI or the
+RDNA4 path**. What is shared is the codec (bit-exact on both), the 32-lane atom
+group (`kAtomLanes`, two groups per CDNA wave), and the tile geometry. What is
+device-specific is behind the trait record.
+
+Hardware-derived facts recorded here so they are not re-litigated:
+
+* `v_dot2_f32_bf16` is `dot12`/`dot13-insts`, i.e. **not** on `gfx942` (only
+  `gfx950`). `dot2_bf16` selects it with `__builtin_amdgcn_is_invocable` and
+  otherwise emits two scalar FMAs; no fast-math is enabled, so the fallback is
+  bit-identical.
+* `__builtin_amdgcn_ballot_w32` does not exist on a wave64 target. `ballot_atom_group`
+  uses `ballot_w64` and selects the low or high half by lane id; the value is
+  exactly what `ballot_w32` would have produced for that 32-lane group.
+* The MFMA fragment map for `v_mfma_f32_16x16x16bf16` was derived on hardware
+  with a one-hot probe and asserted against a CPU reference. With `A` an
+  activation tile and `B = Wᵀ` (weight stored `[n][k]`):
+
+  ```
+  A reg (l,i) = A[ row = l % 16     ][ k   = 4*(l/16) + i ]
+  B reg (l,i) = B[ k   = 4*(l/16)+i ][ col = l % 16          ]
+  D reg (l,i) = D[ row = 4*(l/16)+i ][ col = l % 16          ]
+  ```
+
+  so one 8-byte load of a decoded weight row is the `B` operand for every token
+  tile, which is why the decoded super-atom is staged row-major in shared
+  memory. The row stride is padded by 4 BF16 so the 16 rows land on 16 distinct
+  bank pairs (at the unpadded 64 BF16 every row started on bank 0).
+
+**Correctness on `gfx942`:** the full shared suite (`tests/api`, 448 tests) and
+the HIP suite (`tests/hip`, 151 tests) pass. The nf12 and bf16t twins are
+bit-identical across `m = 1 … 1024` and `k = 64 … 4096`, including the partial
+tail tiles (`m = 17, 129, 257, 1000, …`), and both stay inside the SPEC §6.2
+tolerance against the reference.
+
+**Dense linear (MI300X), warm µs, `n=4096 k=4096`:**
+
+| m | route | nf12 µs | decode + rocBLAS µs | ratio |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | fused GEMV | 74.9 | 34.6 | 2.17 |
+| 16 | fused MFMA (contract band) | 78.0 | 34.8 | 2.24 |
+| 64 | fused MFMA (contract band) | 213.2 | 31.3 | 6.82 |
+| 256 | decode + rocBLAS | 47.3 | 46.0 | 1.03 |
+| 1024 | decode + rocBLAS | 85.9 | 92.2 | 0.93 |
+| 4096 | decode + rocBLAS | 260.3 | 246.9 | 1.05 |
+
+Above the small-M band the routed decode + rocBLAS path is at parity with
+rocBLAS on the already-decoded weight; it is not slower. The fused MFMA kernel
+is deliberately not used there — it was 13–18× off rocBLAS on this part because
+each 16-column stripe re-reads the whole activation matrix.
+
+**MoE (MI300X), `E=8 N=K=4096 topk=2`:** `moe_linear` is 142 / 207 / 469 µs at
+`t = 64 / 256 / 1024` on the fused routed MFMA kernel. At `t = 1024` the
+decode + `_grouped_mm` route measured 199 µs, i.e. 2.4× faster, but is rejected
+because it cannot be graph-captured on this ROCm build; the fused kernel is the
+graph-safe native route.
 
 ## Performance (R9700, `gfx1201`, 32 CUs, wave32)
 

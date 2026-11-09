@@ -441,16 +441,12 @@ __global__ void wmma_reduce_kernel(const float* __restrict__ partial, __hip_bflo
 
 using namespace nf12_hip;
 
-// `__gfx1201__` is defined only while compiling DEVICE code, so a host function
-// cannot use it: guarding on it silently reports "unsupported" and the route is
-// never taken. Ask the runtime instead. gfx1250 has no wmma-128b-insts, so it
-// stays on the decode-then-GEMM route even though the file compiles there.
+// Trait query, not an arch string: the capability table already resolved this
+// device's matrix-core family from the runtime, once, per ordinal. gfx1250 has
+// no wmma-128b-insts and resolves to kNone, so it keeps the decode-then-GEMM
+// route even though this file compiles there.
 static int wmma_arch_ok(int device) {
-  hipDeviceProp_t props;
-  if (hipGetDeviceProperties(&props, device) != hipSuccess) return 0;
-  const char* arch = props.gcnArchName;
-  return (arch[0] == 'g' && arch[1] == 'f' && arch[2] == 'x' && arch[3] == '1' &&
-          arch[4] == '2' && arch[5] == '0' && (arch[6] == '0' || arch[6] == '1'));
+  return device_traits(device).matrix == MatrixCore::kWmma ? 1 : 0;
 }
 
 // True when the CURRENT device has wmma-128b-insts.

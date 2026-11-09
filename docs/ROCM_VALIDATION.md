@@ -1,16 +1,34 @@
 # ROCm validation and performance
 
-Validated on Radeon AI PRO R9700 (`gfx1201`, 8 MiB L2, 64 MiB L3), ROCm SDK
-10.1.0, HIP 7.16.26385 (`7.16.26385-0000000`), PyTorch
-2.16.0.dev20261025+rocm10.1, and free-threaded Python 3.14 (`PYTHON_GIL=0`).
-OMP/MKL threads were limited to one. Libraries were built from source.
+Validated on two AMD parts:
+
+* Radeon AI PRO R9700 (`gfx1201`, RDNA4, 32 CUs, wave32, 8 MiB L2, 64 MiB L3)
+* Instinct MI300X (`gfx942`, CDNA3, 304 CUs, 8 XCCs, wave64, 4 MiB L2)
+
+both with ROCm SDK 10.1.0, HIP 7.16.26385 (`7.16.26385-0000000`),
+PyTorch 2.16.0.dev+rocm10.1, and free-threaded Python 3.14. OMP/MKL threads
+were limited to one. Libraries were built from source.
+
+Kernel selection is trait-based (`csrc/hip/capability.{h,hip}`): wave width,
+matrix-core family, CUs, XCCs, L2 and smem are read from the device and cached
+per ordinal. The arch string is only used to confirm the family the runtime
+reports; no code path branches on it.
 
 ## Test results
 
 | Suite | Device | Passed | Skipped | Deselected |
 | --- | --- | ---: | ---: | ---: |
-| HIP + shared API | R9700 | 600 | 12 | 1 |
-| Shared API | RTX 4090 | 545 | 16 | 1 |
+| HIP + shared API | R9700 | 692 | 12 | 1 |
+| HIP + shared API | MI300X (`gfx942`) | 604 | 31 | 0 |
+| Shared API | RTX 4090 | 447 | 13 | 1 |
+
+The MI300X run is `tests/api` + `tests/hip` on one visible device. Of the 31
+skips, 18 are the RDNA4-only WMMA plan tests (`wmma_hip_*`, which gate on
+`nf12_hip_wmma_supported`), 4 are the decode-slice budget on a device whose
+matrix core covers all M, and the rest are existing shape/arch guards.
+Accuracy on `gfx942`: the nf12 and bf16t twins are bit-identical across
+`m = 1 … 1024` and `k = 64 … 4096` (including the partial tail tiles), and both
+meet the SPEC §6.2 gate against the reference.
 
 Both runs use the shared ABI frontend and source-built native and torch libraries,
 with two visible GPUs to exercise concurrent device/stream propagation. The

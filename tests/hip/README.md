@@ -1,6 +1,7 @@
 # ROCm test environment
 
-Validated on Radeon AI PRO R9700 (`gfx1201`) with:
+Validated on Radeon AI PRO R9700 (`gfx1201`, RDNA4) and Instinct MI300X
+(`gfx942`, CDNA3) with:
 
 | Component | Validated version |
 | --- | --- |
@@ -8,6 +9,12 @@ Validated on Radeon AI PRO R9700 (`gfx1201`) with:
 | HIP | 7.16.26385 (`hipconfig --version`: `7.16.26385-0000000`) |
 | PyTorch | 2.16.0.dev20261025+rocm10.1 |
 | Python | 3.14, free-threaded (`PYTHON_GIL=0`) |
+
+The suite gates on the ISAs that expose a matrix core the kernels drive
+(`_gating.py`: `gfx1200`, `gfx1201`, `gfx942`, `gfx950`). That is only a test
+filter — the library itself selects a kernel from device traits. Tests whose
+expectations are specific to one family (the WMMA plan and grid tests) still
+skip on the other, so a run reports them as skips rather than failures.
 
 The repository-level `tests/conftest.py` requires **ROCm >= 10.1.0 and HIP >= 7.16.26385**.
 On a ROCm PyTorch build it fails before collecting test modules if either

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // HIP implementation of the private backend boundary; public validation is in api.cpp.
 #include "../backend.h"
+#include "capability.h"
 #include "linear.h"
 #include "nf12/nf12_hip.h"
 #include <algorithm>
@@ -55,27 +56,78 @@ size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int) {
   return std::max(nf12_hip_linear_wmma_workspace_bytes(n, k, std::min(m, cap)),
                   nf12_hip_linear_wmma_workspace_bytes(n, k, m % cap));
 }
+
+// Which linear route this device takes. Trait-driven: RDNA4 waves take the
+// v_wmma path, CDNA3 waves take v_mfma, anything else (or a device the build
+// did not target) takes decode-then-GEMM through the fused small-M kernel and
+// the caller's GEMM. No arch string is consulted here.
+namespace {
+static nf12_hip::MatrixCore linear_matrix_core(const LinearArgs& a) {
+  return nf12_hip::device_traits(a.device).matrix;
+}
+}  // namespace
+
 cudaError_t linear(const LinearArgs& a) {
   const bool twin = a.source == WeightSource::kBF16T;
-  const int64_t chunk = nf12_hip_wmma_max_m();
-  for (int64_t m0 = 0; m0 < a.m; ) {
-    const int64_t rows = std::min(chunk, a.m - m0);
-    const auto* x = static_cast<const uint8_t*>(a.x) + m0 * a.ldx * 2;
-    auto* y = static_cast<uint8_t*>(a.y) + m0 * a.ldy * 2;
-    const auto* escapes = static_cast<const uint4*>(a.escapes);
-    const hipError_t err = rows < 16
-        ? nf12_hip::linear_fused_strided(a.weight, escapes, a.exp_base, x, y, a.n, a.k,
-                                         rows, a.bias, a.ldx, a.ldy, twin, a.stream)
-        : nf12_hip::linear_wmma_strided(a.weight, escapes, a.exp_base, x, y, a.n, a.k,
-                                        rows, a.bias, a.workspace, a.workspace_bytes,
-                                        a.ldx, a.ldy, twin, a.stream);
-    if (err != hipSuccess) return err;
-    m0 += rows;
+  const nf12_hip::MatrixCore mc = linear_matrix_core(a);
+  if (mc == nf12_hip::MatrixCore::kMfma) {
+    return nf12_hip::linear_mfma_strided(a.weight, static_cast<const uint4*>(a.escapes), a.exp_base,
+                                         a.x, a.y, a.n, a.k, a.m, a.bias, a.ldx, a.ldy, twin,
+                                         a.stream);
   }
-  return hipSuccess;
+  // The RDNA4 matrix-core route keeps its own M chunking. It reports
+  // hipErrorNotSupported when the device lacks wmma-128b-insts, and the fused
+  // kernel below covers those shapes exactly.
+  if (mc == nf12_hip::MatrixCore::kWmma) {
+    const int64_t chunk = nf12_hip_wmma_max_m();
+    for (int64_t m0 = 0; m0 < a.m;) {
+      const int64_t rows = std::min(chunk, a.m - m0);
+      const auto* x = static_cast<const uint8_t*>(a.x) + m0 * a.ldx * 2;
+      auto* y = static_cast<uint8_t*>(a.y) + m0 * a.ldy * 2;
+      const auto* escapes = static_cast<const uint4*>(a.escapes);
+      const hipError_t err = rows < 16
+          ? nf12_hip::linear_fused_strided(a.weight, escapes, a.exp_base, x, y, a.n, a.k,
+                                           rows, a.bias, a.ldx, a.ldy, twin, a.stream)
+          : nf12_hip::linear_wmma_strided(a.weight, escapes, a.exp_base, x, y, a.n, a.k,
+                                          rows, a.bias, a.workspace, a.workspace_bytes,
+                                          a.ldx, a.ldy, twin, a.stream);
+      if (err != hipSuccess) return err;
+      m0 += rows;
+    }
+    return hipSuccess;
+  }
+  // No matrix core: the fused decode+GEMM kernel handles small M exactly; above
+  // it the caller's decode-then-GEMM route has already been chosen by
+  // linear_decode_gemm_rows below, so this path is only the tail.
+  if (a.m >= 16) return hipErrorNotSupported;
+  return nf12_hip::linear_fused_strided(a.weight, static_cast<const uint4*>(a.escapes), a.exp_base,
+                                        a.x, a.y, a.n, a.k, a.m, a.bias, a.ldx, a.ldy, twin,
+                                        a.stream);
 }
 int64_t linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, int device) {
-  if (m < 16 || (m <= nf12_hip_wmma_max_m() && nf12_hip_wmma_supported_device(m, device))) return 0;
+  const nf12_hip::MatrixCore mc = nf12_hip::device_traits(device).matrix;
+  // Both matrix cores cover the small-M band themselves, so small M never
+  // decodes the weight first (that is the shared API contract, tests/api).
+  //
+  // Above the band they diverge, and the split is a TRAIT, not an ISA:
+  //  - RDNA4 (kWmma) waves are narrow and few, so the fused WMMA kernel keeps
+  //    the packed weight in registers and never materialises a decoded tile.
+  //    It covers all M up to its own cap.
+  //  - CDNA3 (kMfma) waves are twice as wide on ~10x the CUs, and its fused
+  //    kernel is bandwidth-bound on the activation re-read (every 16-column
+  //    stripe re-reads all of x). The native-speed route on that shape is the
+  //    decode-once + rocBLAS route the CUDA build also uses above its own
+  //    crossover, so CDNA3 takes it. The fused MFMA kernel remains the exact
+  //    bf16t twin and the C-API path (SPEC.md 6.2).
+  constexpr int64_t kSmallM = 64;
+  if (mc == nf12_hip::MatrixCore::kNone) {
+    // No matrix core: only the fused m < 16 kernel exists, so everything above
+    // it must decode first (this is the pre-existing fallback route).
+    if (m < 16) return 0;
+  } else if (m <= kSmallM) {
+    return 0;
+  }
+  if (mc == nf12_hip::MatrixCore::kWmma && m <= nf12_hip_wmma_max_m()) return 0;
   constexpr int64_t kSliceBytes = int64_t(256) << 20;
   const int64_t cap = std::max<int64_t>(16, kSliceBytes / (2 * k) / 16 * 16);
   const int64_t slices = (n + cap - 1) / cap;
@@ -90,18 +142,40 @@ cudaError_t moe_align(const int32_t* ids, int64_t tokens, int64_t topk, int64_t 
   return nf12_hip_moe_align(ids, tokens, topk, experts, sorted, offsets, ws, bytes, stream);
 }
 size_t moe_linear_workspace_bytes(int64_t, int64_t, int64_t, int64_t, int) { return 0; }
-// Native routed GEMM handles all M; no aten::_grouped_mm dependency on ROCm.
+// Routed GEMM policy. The fused MFMA/packed kernel is the ONLY routed route on
+// HIP, and it is what both the C API and the torch op use (rows == 0).
+//
+// The CUDA build can hand a gathered launch to decode + aten::_grouped_mm. That
+// is not usable here: on this ROCm build _grouped_mm stages its `offs`
+// argument through an unpinned host tensor, so it raises during CUDA graph
+// capture (tests/api/test_decode_route.py::test_moe_route_graph_capture). The
+// fused routed kernel keeps the packed weight resident, needs no workspace and
+// is capturable, so it stays the single route. Selection is still trait-based:
+// a device without a matrix core reports kNone and the fused kernel handles it
+// exactly.
 int64_t moe_linear_decode_gemm_rows(int64_t, int64_t, int64_t, int64_t, int) { return 0; }
+
 cudaError_t moe_linear(const MoeLinearArgs& a) {
   if (a.num_experts > std::numeric_limits<int32_t>::max()) return hipErrorNotSupported;
-  if (a.source == WeightSource::kBF16T) {
-    return nf12_hip_moe_linear_bf16t(a.weight, static_cast<int32_t>(a.num_experts), a.x, a.ldx,
-        a.gather, a.gather_div, a.scatter, a.expert_offsets, a.max_assignments, a.row_scale,
-        a.y, a.ldy, a.n, a.k, a.stream);
+  const bool twin = a.source == WeightSource::kBF16T;
+  const nf12_hip::MatrixCore mc = nf12_hip::device_traits(a.device).matrix;
+  if (mc == nf12_hip::MatrixCore::kMfma) {
+    return nf12_hip::moe_linear_mfma(
+        a.weight, static_cast<const uint4*>(a.escapes), a.escape_offsets, a.exp_base,
+        static_cast<int32_t>(a.num_experts), a.x, a.ldx, a.gather, a.gather_div, a.scatter,
+        a.expert_offsets, a.max_assignments, a.row_scale, a.y, a.ldy, a.n, a.k, twin, a.stream);
   }
-  return nf12_hip_moe_linear(a.weight, static_cast<const uint4*>(a.escapes), a.escape_offsets,
-      a.exp_base, static_cast<int32_t>(a.num_experts), a.x, a.ldx, a.gather, a.gather_div, a.scatter,
-      a.expert_offsets, a.max_assignments, a.row_scale, a.y, a.ldy, a.n, a.k, a.stream);
+  if (mc == nf12_hip::MatrixCore::kWmma) {
+    if (a.source == WeightSource::kBF16T) {
+      return nf12_hip_moe_linear_bf16t(a.weight, static_cast<int32_t>(a.num_experts), a.x, a.ldx,
+          a.gather, a.gather_div, a.scatter, a.expert_offsets, a.max_assignments, a.row_scale,
+          a.y, a.ldy, a.n, a.k, a.stream);
+    }
+    return nf12_hip_moe_linear(a.weight, static_cast<const uint4*>(a.escapes), a.escape_offsets,
+        a.exp_base, static_cast<int32_t>(a.num_experts), a.x, a.ldx, a.gather, a.gather_div, a.scatter,
+        a.expert_offsets, a.max_assignments, a.row_scale, a.y, a.ldy, a.n, a.k, a.stream);
+  }
+  return hipErrorNotSupported;
 }
 cudaError_t moe_combine(const void* y, int64_t ldy, int64_t tokens, int64_t topk,
                         int64_t n, void* out, int64_t ldo, cudaStream_t stream) {
