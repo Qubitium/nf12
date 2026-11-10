@@ -1,6 +1,8 @@
 .venv/
 build/
 *.so
+*.so.*
+.rocprofv3/
 __pycache__/
 *.egg-info/
 /dist/
