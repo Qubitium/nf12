@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// Programmatic dependent launch applies to small-M configs with mt <= 2 on
-// SM90+, the SM120 large-M family and SM100/SM110 cluster split-K tcgen05
-// configs. These launches use programmatic stream serialization and call
-// griddepcontrol.launch_dependents on entry, then griddepcontrol.wait before
-// their first global-memory access.
-// - All reads of x, weights, escapes and bias and all writes of y wait for
-//   the previous kernel to complete and make its writes visible. Only block
-//   scheduling and shared-memory setup overlap that kernel's tail.
+// Programmatic dependent launch applies to SM103 GEMV, small-M configs with
+// mt <= 2 on SM90+, the SM120 large-M family and SM100/SM110 cluster split-K
+// tcgen05 configs. These launches use programmatic stream serialization and
+// call griddepcontrol.launch_dependents on entry.
+// - By default, all reads of x, weights, escapes and bias and all writes of y
+//   wait for the previous kernel to complete and make its writes visible.
+// - Explicitly ready NF12 weights allow GEMV and small-M to stage packed weights
+//   and escapes before the wait. Activation, bias and output accesses still wait.
 // - A following programmatically serialized kernel must execute
 //   griddepcontrol.wait (cudaGridDependencySynchronize) before reading y.
 //   Normal launches, memcpys and events retain ordinary stream ordering.
@@ -17,6 +17,7 @@
 #include <nf12/format.cuh>
 
 #include "internal.h"
+#include "linear/gemv.h"
 #include "linear/large_m.h"
 #include "linear/sm120/large_m_sm120.h"
 #include "linear/sm90/large_m_narrow_cluster.h"
@@ -24,6 +25,8 @@
 #include "linear/sm90/large_m_sm90.h"
 #include "linear/sm100/large_m_tc.h"
 #include "linear/small_m.h"
+#include "linear/small_m_async.h"
+#include "linear/small_m_direct.h"
 
 namespace nf12::detail {
 namespace {
@@ -66,7 +69,7 @@ bool use_small_m(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
 // `external_min_m` selects row-major slices for callers with cuBLAS.
 // `narrow_min_m` selects that external route for widths up to narrow_n(),
 // including small-M shapes, when use_narrow() does not apply.
-// kNever disables a route. SM103 and SM121 follow SM100 and SM120 policies.
+// kNever disables a route. SM103 follows SM100; SM121 follows SM120.
 struct SliceRoute {
   int sm_arch;
   int64_t internal_min_m;
@@ -160,6 +163,7 @@ cudaError_t linear_sliced(const LinearArgs& a, int64_t rows) {
   uint8_t* buf = static_cast<uint8_t*>(a.workspace);
   LinearArgs s = a;
   s.source = WeightSource::kBF16T;
+  s.weights_ready = false;  // Decoded slices are produced on this stream.
   s.escapes = nullptr;
   s.num_escapes = 0;
   s.exp_base = 0;
@@ -186,6 +190,10 @@ cudaError_t linear_sliced(const LinearArgs& a, int64_t rows) {
 }  // namespace
 
 size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
+  if (gemv_heuristic(m, n, k, dev).rows != 0 ||
+      small_m_direct_heuristic(m, n, k, dev).warps != 0 ||
+      small_m_async_heuristic(m, n, k, dev).stages != 0)
+    return 0;
   if (use_narrow(m, n, k, dev)) return 0;
   if (use_small_m(m, n, k, dev)) return small_m_workspace_bytes(small_m_heuristic(m, n, k, dev), m, n, dev);
   const int64_t rows = internal_slice_rows(m, n, k, dev);
@@ -195,6 +203,8 @@ size_t linear_workspace_bytes(int64_t m, int64_t n, int64_t k, const DeviceInfo&
 int64_t linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, const DeviceInfo& dev) {
   // SM86 2K gates: cuBLAS 13.1 selection cliffs bound the measured fused-MMA win.
   if (dev.sm_arch == 86 && k == 2048 && (n == 64 || n == 128) && m >= 2932 && m <= 4779) return 0;
+  if (dev.sm_arch == 103 && k <= 128 && n >= 512 && n <= 8192 && m >= 64)
+    return slice_rows(n, k, kExternalSliceBytes);
   const SliceRoute r = slice_route(dev);
   const int64_t narrow_min_m = dev.sm_arch == 86 && k >= 4096 ? 49 : r.narrow_min_m;
   const bool route = n <= narrow_n(dev) ? !use_narrow(m, n, k, dev) &&
@@ -219,6 +229,12 @@ cudaError_t linear(const LinearArgs& a) {
                                           (a.num_escapes > 0 && a.escapes == nullptr)))
     return cudaErrorInvalidValue;
   const DeviceInfo& dev = *a.dev;
+  const GemvConfig gemv = gemv_heuristic(a.m, a.n, a.k, dev);
+  if (gemv.rows != 0) return linear_gemv(a, gemv);
+  const SmallMDirectConfig direct = small_m_direct_heuristic(a.m, a.n, a.k, dev);
+  if (direct.warps != 0) return linear_small_m_direct(a, direct);
+  const SmallMAsyncConfig asynchronous = small_m_async_heuristic(a.m, a.n, a.k, dev);
+  if (asynchronous.stages != 0) return linear_small_m_async(a, asynchronous);
   const size_t ws = linear_workspace_bytes(a.m, a.n, a.k, dev);
   if (a.workspace_bytes < ws || (ws > 0 && a.workspace == nullptr)) return cudaErrorInvalidValue;
 

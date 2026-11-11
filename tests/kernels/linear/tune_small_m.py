@@ -56,6 +56,7 @@ pts = [p for path in a.sweeps for p in json.load(open(path))["results"]]
 lib = h.Lib()
 sms = torch.cuda.get_device_properties(0).multi_processor_count
 sm8x = torch.cuda.get_device_capability()[0] < 9
+sm103 = torch.cuda.get_device_capability() == (10, 3)
 CFG = re.compile(r"mt(\d+)_w(\d+)_kc(\d+)_s(\d+)(?:_kp(\d+))?$")
 
 # Group model inputs by weight ring, retaining the heuristic's iteration
@@ -72,12 +73,18 @@ for p in pts:
         cnt = -(-kb // kc)
         if (warps == 4 and mt == 8 and cnt // kp > 16) or (warps == 16 and nb < 16):
             continue
+        if sm103:
+            if warps > 8 or (k <= 128 and (warps != 4 or kc != 1)):
+                continue
+            if kp > 1 and (m > 8 or (n >= 4096 and k >= 4096)):
+                continue
         o = lib.resident_ctas(h.Config(mt, warps, kc, sl, kp), m, n, k)
         if o <= 0:
             continue
         total = -(-nb // (warps // kp)) * kc
+        streamed_nb = -(-nb // (warps // kp)) * (warps // kp) if sm103 else nb
         slices = 1 if sl == 0 else -(-cnt // sl)
-        cands.append(((-warps, kp, kc), name, dict(cap=o * sms, total=total, per=nb * kb / total, cnt=cnt,
+        cands.append(((-warps, kp, kc), name, dict(cap=o * sms, total=total, per=streamed_nb * kb / total, cnt=cnt,
                                                   warps=warps, kp=kp, kc=kc, mt=mt, slices=slices)))
     cands.sort(key=lambda c: c[0])
     groups.setdefault(lib.stages(1 if m <= 8 else 2 if m <= 16 else 4 if m <= 32 else 8, n, k), []).append(

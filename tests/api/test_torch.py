@@ -368,13 +368,14 @@ def test_torch_compile_fullgraph(dynamic):
             assert_bitwise(torch.compile(block.up, fullgraph=True, dynamic=dynamic)(x), block.up(x))
 
 
-def test_torch_compile_functional():
+@pytest.mark.parametrize("static_weights", [False, True])
+def test_torch_compile_functional(static_weights):
     torch._dynamo.reset()
     nw = nf12.encode(weight(128, 256))
 
     @torch.compile(fullgraph=True)
     def f(x):
-        return nf12.linear(x, nw) * 2
+        return nf12.linear(x, nw, static_weights=static_weights) * 2
 
     x = activations(4, 256)
-    assert_bitwise(f(x), nf12.linear(x, nw) * 2)
+    assert_bitwise(f(x), nf12.linear(x, nw, static_weights=static_weights) * 2)

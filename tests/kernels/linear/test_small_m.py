@@ -102,6 +102,20 @@ def test_every_m_dispatch(m):
     run_pair(h.AUTO, m, enc, ldx=enc.k + 8 * (m % 3), ldy=enc.n + 8 * (m % 2), bias=bias if m % 2 else None)
 
 
+@pytest.mark.parametrize("n,k", [(144, 2112), (1024, 768)])
+def test_single_token_weight_formats(n, k):
+    enc = encoded(n, k, seed=7, escapes=0.003)
+    bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    run_pair(h.AUTO, 1, enc, ldx=k + 8, ldy=n + 8, bias=bias)
+
+
+@pytest.mark.parametrize("m,n,k", [(3, 4096, 1280), (8, 1536, 128), (8, 2304, 1536), (8, 6144, 7168), (8, 3584, 7168)])
+def test_small_batch_weight_formats(m, n, k):
+    enc = encoded(n, k, seed=7, escapes=0.003)
+    bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    run_pair(h.AUTO, m, enc, ldx=k + 8, ldy=n + 8, bias=bias)
+
+
 @pytest.mark.parametrize("m", [1, 3, 8, 9, 16, 17, 31, 32, 40, 64])
 def test_every_config(m):
     """All template/split/slice combinations on a shape with an uneven K split and a partial row group."""

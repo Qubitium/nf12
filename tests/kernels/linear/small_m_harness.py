@@ -32,7 +32,7 @@ class Config:
     warps: int
     kc: int
     slice: int = 0
-    kp: int = 1  # K parts per CTA (below SM90)
+    kp: int = 1  # K parts per CTA on SM8x and SM103
 
     def __str__(self):
         return f"mt{self.mt}_w{self.warps}_kc{self.kc}_s{self.slice}" + (f"_kp{self.kp}" if self.kp != 1 else "")
@@ -65,7 +65,7 @@ def build(force=False):
     out_dir = os.path.join(ROOT, "build", "small_m_tests" + ("_full" if with_large else ""))
     os.makedirs(out_dir, exist_ok=True)
     lib = os.path.join(out_dir, "libsmall_m_shim.so")
-    prefixes = ("small_m", "large_m") if with_large else ("small_m",)
+    prefixes = ("small_m", "large_m", "gemv") if with_large else ("small_m", "gemv")
     srcs = sorted(
         os.path.join(directory, f)
         for directory, _, files in os.walk(LINEAR)
@@ -139,13 +139,15 @@ class Lib:
         L.nf12_sm_heuristic_slice.argtypes = [i, i, i, i, i64, i64, i64]
         L.nf12_sm_stream_read.restype = i
         L.nf12_sm_stream_read.argtypes = [vp, sz, i, i, vp, vp]
+        L.nf12_sm_pdl_copy.restype = i
+        L.nf12_sm_pdl_copy.argtypes = [vp, vp, sz, vp, vp, sz, ctypes.c_ulonglong, vp]
         self._ws = None
 
     def supported(self, cfg, m, n, k):
         return bool(self.lib.nf12_sm_supported(cfg.mt, cfg.warps, cfg.kc, cfg.slice, cfg.kp, m, n, k))
 
     def stages(self, mt, n, k):
-        """Weight ring of mt-tile configs on an n x k weight: 0 = register ring, else shared-memory stages."""
+        """Default weight ring for mt-tile configs: 0 = registers, else shared-memory stages."""
         return self.lib.nf12_sm_stages(mt, n, k)
 
     def slice_step(self, mt, n, k):
@@ -197,6 +199,15 @@ class Lib:
                                            torch.cuda.current_stream().cuda_stream)
         if err != 0:
             raise RuntimeError(f"stream_read failed: {err}")
+
+    def pdl_copy(self, src0, dst0, src1=None, dst1=None, delay_cycles=20_000_000):
+        """Copy up to two buffers after releasing a PDL-dependent consumer."""
+        err = self.lib.nf12_sm_pdl_copy(
+            src0.data_ptr(), dst0.data_ptr(), src0.nbytes,
+            None if src1 is None else src1.data_ptr(), None if dst1 is None else dst1.data_ptr(),
+            0 if src1 is None else src1.nbytes, delay_cycles, torch.cuda.current_stream().cuda_stream)
+        if err != 0:
+            raise RuntimeError(f"pdl_copy failed: {err}")
 
 
 @dataclass

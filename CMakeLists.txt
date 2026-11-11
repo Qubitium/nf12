@@ -32,9 +32,9 @@ set(CMAKE_CUDA_ARCHITECTURES "${_nf12_archs}")
 
 option(NF12_BUILD_NATIVE "Build native libraries during installation" ON)
 if(NF12_BUILD_NATIVE)
-  project(nf12 VERSION 1.0.0 LANGUAGES CXX CUDA)
+  project(nf12 VERSION 1.1.0 LANGUAGES CXX CUDA)
 else()
-  project(nf12 VERSION 1.0.0 LANGUAGES NONE)
+  project(nf12 VERSION 1.1.0 LANGUAGES NONE)
 endif()
 
 # Installed wheels retain the sources for runtime builds without a checkout.

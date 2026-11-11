@@ -139,13 +139,14 @@ def test_c_api_linear_matches_bf16t(lib, n, k, m):
     ldy = n + 8
     need = lib.nf12_linear_workspace_bytes(m, n, k, torch.cuda.current_device())
     outs = []
-    for fill, run in [(0xFF, "nf12"), (0x7F, "nf12"), (0xA5, "bf16t")]:
+    for fill, run in [(0xFF, "nf12"), (0x7F, "nf12"), (0xA5, "bf16t"), (0xFF, "static")]:
         ws = torch.full((need,), fill, dtype=torch.uint8, device=DEV) if need else None
         workspace = ptr(ws) if ws is not None else None
         y = torch.full((m, ldy), -7.0, dtype=torch.bfloat16, device=DEV)
-        if run == "nf12":
-            status = lib.nf12_linear(ptr(x), m, x.stride(0), ctypes.byref(weight), ptr(bias), ptr(y), ldy,
-                                     workspace, need, stream())
+        if run != "bf16t":
+            linear = lib.nf12_linear_static_weights if run == "static" else lib.nf12_linear
+            status = linear(ptr(x), m, x.stride(0), ctypes.byref(weight), ptr(bias), ptr(y), ldy,
+                            workspace, need, stream())
         else:
             status = lib.nf12_linear_bf16t(ptr(x), m, x.stride(0), ptr(wt), n, k, ptr(bias), ptr(y), ldy,
                                            workspace, need, stream())
@@ -154,6 +155,7 @@ def test_c_api_linear_matches_bf16t(lib, n, k, m):
         outs.append(y[:, :n])
     assert torch.equal(bits(outs[0]), bits(outs[1]))
     assert torch.equal(bits(outs[0]), bits(outs[2]))
+    assert torch.equal(bits(outs[0]), bits(outs[3]))
     ref = x.float() @ w.float().t() + bias.float()
     torch.testing.assert_close(outs[0].float(), ref, rtol=2e-2, atol=2e-2)
 

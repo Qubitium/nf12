@@ -62,6 +62,19 @@ __global__ void __launch_bounds__(256) stream_read_kernel(const uint8_t* __restr
   if (acc == 0x9e3779b9u) out[0] = acc;  // keeps the loads alive
 }
 
+// Release the consumer before producing its input, leaving an overlap window.
+__global__ void pdl_copy_kernel(const uint4* src0, uint4* dst0, size_t count0, const uint4* src1,
+                                uint4* dst1, size_t count1, unsigned long long delay_cycles) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+  const unsigned long long start = clock64();
+  while (clock64() - start < delay_cycles) {}
+  for (size_t i = threadIdx.x; i < count0; i += blockDim.x) dst0[i] = src0[i];
+  for (size_t i = threadIdx.x; i < count1; i += blockDim.x) dst1[i] = src1[i];
+}
+
 }  // namespace
 
 extern "C" {
@@ -126,6 +139,24 @@ int nf12_sm_stream_read(const void* p, size_t bytes, int blocks, int depth, void
     default: return static_cast<int>(cudaErrorInvalidValue);
   }
   return static_cast<int>(cudaGetLastError());
+}
+
+int nf12_sm_pdl_copy(const void* src0, void* dst0, size_t bytes0, const void* src1, void* dst1, size_t bytes1,
+                     unsigned long long delay_cycles, void* stream) {
+  if (current_device().sm_arch < 90) return static_cast<int>(cudaErrorNotSupported);
+  if (bytes0 % 16 != 0 || bytes1 % 16 != 0) return static_cast<int>(cudaErrorInvalidValue);
+  cudaLaunchAttribute attr{};
+  attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attr.val.programmaticStreamSerializationAllowed = 1;
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = dim3(1);
+  cfg.blockDim = dim3(128);
+  cfg.stream = static_cast<cudaStream_t>(stream);
+  cfg.attrs = &attr;
+  cfg.numAttrs = 1;
+  return static_cast<int>(cudaLaunchKernelEx(
+      &cfg, pdl_copy_kernel, static_cast<const uint4*>(src0), static_cast<uint4*>(dst0), bytes0 / 16,
+      static_cast<const uint4*>(src1), static_cast<uint4*>(dst1), bytes1 / 16, delay_cycles));
 }
 
 }  // extern "C"
