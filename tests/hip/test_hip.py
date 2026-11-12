@@ -295,7 +295,7 @@ def test_native_linear_matches_twin_and_dense(lib, n, k, m):
     [
         (4096, 4096, 16),  # four-way split
         (4096, 4096, 64),  # two-way split
-        (2048, 4096, 16),  # eight-way split
+        (256, 4096, 16),  # eight-way split
     ],
 )
 def test_bf16t_twin_matches_nf12_split_k_plans(lib, n, k, m):

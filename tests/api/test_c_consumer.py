@@ -44,6 +44,7 @@ def test_header_declares_the_c_api():
         "nf12_status_string", "nf12_last_cuda_error", "nf12_packed_bytes", "nf12_bf16t_bytes",
         "nf12_encode_workspace_bytes", "nf12_encode_analyze", "nf12_encode", "nf12_decode",
         "nf12_linear_workspace_bytes", "nf12_linear", "nf12_linear_decode_gemm_rows", "nf12_pack_bf16t",
+        "nf12_linear_static_weights",
         "nf12_linear_bf16t", "nf12_moe_align_workspace_bytes", "nf12_moe_align", "nf12_moe_linear_workspace_bytes",
         "nf12_moe_linear", "nf12_moe_linear_bf16t", "nf12_moe_combine", "nf12_moe_silu_mul", "nf12_moe_decode",
         "nf12_moe_linear_decode_gemm_rows", "nf12_moe_grouped_operands", "nf12_embedding", "nf12_embedding_i64",

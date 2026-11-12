@@ -48,6 +48,9 @@ def lib():
         "nf12_linear_decode_gemm_rows": (c_int64, [c_int64, c_int64, c_int64, c_int]),
         "nf12_linear": (c_int, [c_void_p, c_int64, c_int64, ctypes.POINTER(Weight), c_void_p, c_void_p, c_int64,
                                 c_void_p, c_size_t, c_void_p]),
+        "nf12_linear_static_weights": (
+            c_int, [c_void_p, c_int64, c_int64, ctypes.POINTER(Weight), c_void_p, c_void_p, c_int64,
+                    c_void_p, c_size_t, c_void_p]),
         "nf12_pack_bf16t": (c_int, [c_void_p, c_int64, c_int64, c_int64, c_void_p, c_void_p]),
         "nf12_linear_bf16t": (c_int, [c_void_p, c_int64, c_int64, c_void_p, c_int64, c_int64, c_void_p, c_void_p,
                                       c_int64, c_void_p, c_size_t, c_void_p]),
@@ -143,7 +146,8 @@ def test_linear_decode_gemm_rows(lib):
             assert rows == n
 
 
-def test_round_trip_and_linear(lib):
+@pytest.mark.parametrize("static_weights", [False, True])
+def test_round_trip_and_linear(lib, static_weights):
     n, k, m = 128, 512, 5
     w = bf16(n, k)
     weight, keep = c_encode(lib, w)
@@ -158,9 +162,9 @@ def test_round_trip_and_linear(lib):
     y = torch.empty(m, n, dtype=torch.bfloat16, device="cuda")
     ws_bytes = lib.nf12_linear_workspace_bytes(m, n, k, torch.cuda.current_device())
     ws = torch.empty(max(ws_bytes, 1), dtype=torch.uint8, device="cuda")
-    assert lib.nf12_linear(ptr(x), m, k, ctypes.byref(weight), ptr(bias), ptr(y), n, ptr(ws), ws_bytes,
-                           stream()) == OK
-    assert torch.equal(y.view(torch.int16), nf12.linear(x, nw, bias).view(torch.int16))
+    linear = lib.nf12_linear_static_weights if static_weights else lib.nf12_linear
+    assert linear(ptr(x), m, k, ctypes.byref(weight), ptr(bias), ptr(y), n, ptr(ws), ws_bytes, stream()) == OK
+    assert torch.equal(y.view(torch.int16), nf12.linear(x, nw, bias, static_weights=static_weights).view(torch.int16))
 
     wt = torch.empty(lib.nf12_bf16t_bytes(n, k), dtype=torch.uint8, device="cuda")
     assert lib.nf12_pack_bf16t(ptr(w), n, k, k, ptr(wt), stream()) == OK
@@ -170,11 +174,12 @@ def test_round_trip_and_linear(lib):
     assert torch.equal(y.view(torch.int16), y2.view(torch.int16))
 
     # m == 0 is a no-op that touches no pointer.
-    assert lib.nf12_linear(None, 0, k, ctypes.byref(weight), None, None, n, None, 0, stream()) == OK
+    assert linear(None, 0, k, ctypes.byref(weight), None, None, n, None, 0, stream()) == OK
     assert lib.nf12_last_cuda_error() == 0
 
 
-def test_linear_invalid_arguments(lib):
+@pytest.mark.parametrize("static_weights", [False, True])
+def test_linear_invalid_arguments(lib, static_weights):
     n, k, m = 64, 256, 4
     weight, keep = c_encode(lib, bf16(n, k))
     x = bf16(m, k + 8, seed=1)
@@ -182,10 +187,10 @@ def test_linear_invalid_arguments(lib):
     bias = bf16(n + 8)
     big = 1 << 26
     ws = torch.empty(big, dtype=torch.uint8, device="cuda")
+    linear = lib.nf12_linear_static_weights if static_weights else lib.nf12_linear
 
     def run(xp=ptr(x), mm=m, ldx=k + 8, w=weight, bp=ptr(bias), yp=ptr(y), ldy=n + 8, wsp=ptr(ws), wsb=big):
-        return lib.nf12_linear(xp, mm, ldx, ctypes.byref(w) if w is not None else None, bp, yp, ldy, wsp, wsb,
-                               stream())
+        return linear(xp, mm, ldx, ctypes.byref(w) if w is not None else None, bp, yp, ldy, wsp, wsb, stream())
 
     assert run() == OK
     assert run(bp=None) == OK

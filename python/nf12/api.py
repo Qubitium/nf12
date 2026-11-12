@@ -115,15 +115,26 @@ def _check_input(x: torch.Tensor, k: int) -> None:
         raise ValueError(f"nf12: x must have shape [..., {k}], got {tuple(x.shape)}")
 
 
-def linear(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None) -> torch.Tensor:
+def linear(
+    x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None = None, *, static_weights: bool = False
+) -> torch.Tensor:
     """``y = x @ W.T (+ bias)`` maps bf16 ``x`` of shape ``[..., K]`` to ``[..., N]``.
 
     At the per-architecture M threshold (SPEC.md 6.5), row slices are decoded
     and multiplied by cuBLAS, matching the same calls on :func:`decode`.
-    Below that threshold the C API ``nf12_linear`` runs."""
+    Below that threshold the C API runs.
+
+    ``static_weights=True`` permits early reads of packed weights and escapes
+    while a preceding programmatically dependent kernel is still running.
+    Both buffers must already be ready before that kernel releases dependents
+    and remain unchanged until GPU work finishes. Use the default when that
+    kernel produces either buffer. Activations, bias and output retain their waits.
+    Dispatch paths without early weight staging may ignore the opt-in."""
     _check_input(x, weight.shape[1])
     load()
-    return torch.ops.nf12.linear(x, weight.packed, weight.escapes, weight.exp_base, bias)
+    return torch.ops.nf12.linear(
+        x, weight.packed, weight.escapes, weight.exp_base, bias, static_weights=static_weights
+    )
 
 
 def embedding(ids: torch.Tensor, weight: NF12Weight) -> torch.Tensor:

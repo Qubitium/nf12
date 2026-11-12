@@ -29,6 +29,11 @@ The HIP adapter retains full/tail workspace sizing and large-M chunking; the
 CUDA adapter delegates to its existing native launch planners. Backend limits
 return an unsupported status rather than narrowing an expert count unsafely.
 
+`nf12_linear_static_weights` carries `weights_ready` through the shared backend
+arguments to CUDA's native launcher. Only immutable packed weights and escapes
+may be read before the PDL wait. HIP accepts the same entry point and retains
+its normal stream ordering.
+
 Raw C callers still supply scratch storage. Torch callers still obtain local
 scratch from the caching allocator. Streams pass through unchanged; an empty
 routing call still zeros offsets on the supplied stream. No mutable workspace

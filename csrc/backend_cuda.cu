@@ -40,7 +40,7 @@ cudaError_t linear(const LinearArgs& a) {
       static_cast<const __nv_bfloat16*>(a.x), a.m, a.ldx, native_source(a.source), a.weight,
       static_cast<const uint4*>(a.escapes), a.num_escapes, a.exp_base, a.n, a.k,
       static_cast<const __nv_bfloat16*>(a.bias), static_cast<__nv_bfloat16*>(a.y), a.ldy,
-      a.workspace, a.workspace_bytes, a.stream, &detail::device_info(a.device)};
+      a.workspace, a.workspace_bytes, a.stream, &detail::device_info(a.device), a.weights_ready};
   return detail::linear(native);
 }
 

@@ -124,6 +124,38 @@ def c_weight(nw: nf12.NF12Weight) -> Weight:
     return Weight(ptr(nw.packed), esc, nw.num_escapes, n, k, nw.exp_base)
 
 
+@pytest.mark.parametrize("n,k,m", [(n, k, m) for n, k in SHAPES for m in (2048, 8192)] +
+                         [(64, 2048, 7), (128, 4096, 7), (128, 2048, 129), (64, 2048, 513)])
+def test_c_api_linear_matches_bf16t(lib, n, k, m):
+    """Exact-size or NULL workspace, padded x/y rows, bias: NF12 == bf16t, deterministic."""
+    w = escaping_weight(n, k)
+    nw = nf12.encode(w)
+    wt = nf12.pack_bf16t(w)
+    weight = c_weight(nw)
+    x = rand(m, k + 8, seed=1)[:, :k]
+    bias = rand(n, seed=3)
+    ldy = n + 8
+    need = lib.nf12_linear_workspace_bytes(m, n, k, torch.cuda.current_device())
+    outs = []
+    for fill, run in [(0xFF, "nf12"), (0x7F, "nf12"), (0xA5, "bf16t"), (0xFF, "static")]:
+        ws = torch.full((need,), fill, dtype=torch.uint8, device=DEV) if need else None
+        workspace = ptr(ws) if ws is not None else None
+        y = torch.full((m, ldy), -7.0, dtype=torch.bfloat16, device=DEV)
+        if run != "bf16t":
+            linear = lib.nf12_linear_static_weights if run == "static" else lib.nf12_linear
+            status = linear(ptr(x), m, x.stride(0), ctypes.byref(weight), ptr(bias), ptr(y), ldy,
+                            workspace, need, stream())
+        else:
+            status = lib.nf12_linear_bf16t(ptr(x), m, x.stride(0), ptr(wt), n, k, ptr(bias), ptr(y), ldy,
+                                           workspace, need, stream())
+        assert status == OK
+        assert torch.equal(y[:, n:], torch.full_like(y[:, n:], -7.0))
+        outs.append(y[:, :n])
+    assert torch.equal(bits(outs[0]), bits(outs[1]))
+    assert torch.equal(bits(outs[0]), bits(outs[2]))
+    assert torch.equal(bits(outs[0]), bits(outs[3]))
+    ref = x.float() @ w.float().t() + bias.float()
+    torch.testing.assert_close(outs[0].float(), ref, rtol=2e-2, atol=2e-2)
 
 
 
