@@ -401,7 +401,7 @@ def test_fused_moe(t, e, k, inter, topk):
     y = reference.moe_linear(
         h, w2, offsets, scatter=sorted_ids, row_scale=weights.reshape(-1).float()
     )
-    close_moe(out, reference.fused_moe(x, w13, w2, weights, ids), y)
+    close_moe(out, reference.moe_combine(y, topk), y)
 
 
 @pytest.mark.parametrize("k,inter,n,topk", [(1024, 512, 1024, 1), (2048, 1024, 1024, 4),
