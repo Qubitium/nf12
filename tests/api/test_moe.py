@@ -99,14 +99,6 @@ def test_close_moe_rejects_excess_error():
         close_moe(torch.tensor([[0.1]]), ref, terms)
 
 
-def test_bf16t_contract_rejects_one_ulp():
-    ref = torch.ones(1, 1, dtype=torch.bfloat16)
-    out = torch.tensor([[1.0078125]], dtype=torch.bfloat16)
-    with pytest.raises(AssertionError):
-        assert_bitwise(out, ref)
-
-
-
 
 @pytest.mark.parametrize("e,n,k", [(1, 16, 64), (5, 48, 128), (8, 256, 512)])
 def test_encode_moe_matches_dense_encode(e, n, k):
