@@ -28,7 +28,7 @@ if TYPE_CHECKING:  # static exports for type checkers and IDEs; loaded lazily at
     )
     from .nn import NF12Embedding, NF12Linear, verify_weights
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 _EXPORTS = {
     "library_path": "._library",

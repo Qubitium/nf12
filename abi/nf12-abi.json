@@ -1,0 +1,182 @@
+{
+  "c_api": {
+    "descriptors": {
+      "nf12_moe_weight_t": {
+        "align": 8,
+        "fields": {
+          "escape_offsets": {
+            "offset": 16,
+            "type": "const int64_t*"
+          },
+          "escapes": {
+            "offset": 8,
+            "type": "const void*"
+          },
+          "exp_base": {
+            "offset": 24,
+            "type": "const uint8_t*"
+          },
+          "k": {
+            "offset": 48,
+            "type": "int64_t"
+          },
+          "n": {
+            "offset": 40,
+            "type": "int64_t"
+          },
+          "num_experts": {
+            "offset": 32,
+            "type": "int64_t"
+          },
+          "packed": {
+            "offset": 0,
+            "type": "const void*"
+          }
+        },
+        "size": 56
+      },
+      "nf12_weight_t": {
+        "align": 8,
+        "fields": {
+          "escapes": {
+            "offset": 8,
+            "type": "const void*"
+          },
+          "exp_base": {
+            "offset": 40,
+            "type": "uint8_t"
+          },
+          "k": {
+            "offset": 32,
+            "type": "int64_t"
+          },
+          "n": {
+            "offset": 24,
+            "type": "int64_t"
+          },
+          "num_escapes": {
+            "offset": 16,
+            "type": "uint32_t"
+          },
+          "packed": {
+            "offset": 0,
+            "type": "const void*"
+          }
+        },
+        "size": 48
+      }
+    },
+    "functions": {
+      "nf12_bf16t_bytes": "size_t nf12_bf16t_bytes(int64_t n, int64_t k)",
+      "nf12_decode": "nf12_status_t nf12_decode(const nf12_weight_t* w, void* out_bf16, int64_t ldo, cudaStream_t stream)",
+      "nf12_embedding": "nf12_status_t nf12_embedding(const nf12_weight_t* w, const int32_t* ids, int64_t num_ids, void* out_bf16, int64_t ldo, cudaStream_t stream)",
+      "nf12_embedding_i64": "nf12_status_t nf12_embedding_i64(const nf12_weight_t* w, const int64_t* ids, int64_t num_ids, void* out_bf16, int64_t ldo, cudaStream_t stream)",
+      "nf12_encode": "nf12_status_t nf12_encode(const void* w_bf16, int64_t n, int64_t k, int64_t ldw, uint8_t exp_base, void* packed_out, void* escapes_out, uint32_t escapes_capacity, void* workspace, size_t workspace_bytes, cudaStream_t stream)",
+      "nf12_encode_analyze": "nf12_status_t nf12_encode_analyze(const void* w_bf16, int64_t n, int64_t k, int64_t ldw, void* workspace, size_t workspace_bytes, uint8_t* exp_base_out, uint32_t* num_escapes_out, cudaStream_t stream)",
+      "nf12_encode_workspace_bytes": "size_t nf12_encode_workspace_bytes(int64_t n, int64_t k)",
+      "nf12_linear": "nf12_status_t nf12_linear(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w, const void* bias_bf16, void* y_bf16, int64_t ldy, void* workspace, size_t workspace_bytes, cudaStream_t stream)",
+      "nf12_linear_bf16t": "nf12_status_t nf12_linear_bf16t(const void* x_bf16, int64_t m, int64_t ldx, const void* w_bf16t, int64_t n, int64_t k, const void* bias_bf16, void* y_bf16, int64_t ldy, void* workspace, size_t workspace_bytes, cudaStream_t stream)",
+      "nf12_linear_decode_gemm_rows": "int64_t nf12_linear_decode_gemm_rows(int64_t m, int64_t n, int64_t k, int device)",
+      "nf12_linear_static_weights": "nf12_status_t nf12_linear_static_weights(const void* x_bf16, int64_t m, int64_t ldx, const nf12_weight_t* w, const void* bias_bf16, void* y_bf16, int64_t ldy, void* workspace, size_t workspace_bytes, cudaStream_t stream)",
+      "nf12_linear_workspace_bytes": "size_t nf12_linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int device)",
+      "nf12_moe_align": "nf12_status_t nf12_moe_align(const int32_t* topk_ids, int64_t num_tokens, int64_t topk, int64_t num_experts, int32_t* sorted_out, int64_t* expert_offsets_out, void* workspace, size_t workspace_bytes, cudaStream_t stream)",
+      "nf12_moe_align_workspace_bytes": "size_t nf12_moe_align_workspace_bytes(int64_t num_tokens, int64_t topk, int64_t num_experts)",
+      "nf12_moe_combine": "nf12_status_t nf12_moe_combine(const void* y_bf16, int64_t ldy, int64_t num_tokens, int64_t topk, int64_t n, void* out_bf16, int64_t ldo, cudaStream_t stream)",
+      "nf12_moe_decode": "nf12_status_t nf12_moe_decode(const nf12_moe_weight_t* w, const int64_t* expert_offsets, int64_t max_assignments, int64_t row0, int64_t rows, void* out_bf16, int64_t ldo, cudaStream_t stream)",
+      "nf12_moe_grouped_operands": "nf12_status_t nf12_moe_grouped_operands(const void* x_bf16, int64_t ldx, const int32_t* gather, int64_t gather_div, const int64_t* expert_offsets, int64_t max_assignments, int64_t num_experts, int64_t k, void* x_out_bf16, int64_t ldo, int32_t* group_ends, cudaStream_t stream)",
+      "nf12_moe_linear": "nf12_status_t nf12_moe_linear(const void* x_bf16, int64_t ldx, const int32_t* gather, int64_t gather_div, const int32_t* scatter, const int64_t* expert_offsets, int64_t max_assignments, const nf12_moe_weight_t* w, const float* row_scale, void* y_bf16, int64_t ldy, void* workspace, size_t workspace_bytes, cudaStream_t stream)",
+      "nf12_moe_linear_bf16t": "nf12_status_t nf12_moe_linear_bf16t(const void* x_bf16, int64_t ldx, const int32_t* gather, int64_t gather_div, const int32_t* scatter, const int64_t* expert_offsets, int64_t max_assignments, const void* w_bf16t, int64_t num_experts, int64_t n, int64_t k, const float* row_scale, void* y_bf16, int64_t ldy, void* workspace, size_t workspace_bytes, cudaStream_t stream)",
+      "nf12_moe_linear_decode_gemm_rows": "int64_t nf12_moe_linear_decode_gemm_rows(int64_t max_assignments, int64_t num_experts, int64_t n, int64_t k, int device)",
+      "nf12_moe_linear_workspace_bytes": "size_t nf12_moe_linear_workspace_bytes(int64_t max_assignments, int64_t num_experts, int64_t n, int64_t k, int device)",
+      "nf12_moe_silu_mul": "nf12_status_t nf12_moe_silu_mul(const void* h_bf16, int64_t ldh, int64_t rows, int64_t inter, void* out_bf16, int64_t ldo, cudaStream_t stream)",
+      "nf12_pack_bf16t": "nf12_status_t nf12_pack_bf16t(const void* w_bf16, int64_t n, int64_t k, int64_t ldw, void* out, cudaStream_t stream)",
+      "nf12_packed_bytes": "size_t nf12_packed_bytes(int64_t n, int64_t k)",
+      "nf12_status_string": "const char* nf12_status_string(nf12_status_t status)"
+    },
+    "status": {
+      "NF12_ERROR_CUDA": 4,
+      "NF12_ERROR_INSUFFICIENT_WORKSPACE": 3,
+      "NF12_ERROR_INVALID_ARGUMENT": 1,
+      "NF12_ERROR_UNSUPPORTED": 2,
+      "NF12_OK": 0
+    },
+    "version": {
+      "major": 1,
+      "minor": 1
+    }
+  },
+  "digest": "38593029f017e407",
+  "exports": {
+    "version_script": [
+      "nf12_*"
+    ]
+  },
+  "python": {
+    "exports": [
+      "NF12Embedding",
+      "NF12Linear",
+      "NF12MoEWeight",
+      "NF12Weight",
+      "decode",
+      "embedding",
+      "encode",
+      "encode_moe",
+      "fused_moe",
+      "library_path",
+      "linear",
+      "linear_bf16t",
+      "load",
+      "moe_align",
+      "moe_combine",
+      "moe_linear",
+      "moe_linear_bf16t",
+      "moe_silu_mul",
+      "pack_bf16t",
+      "pack_bf16t_moe",
+      "verify_weights"
+    ],
+    "signatures": {
+      "decode": "(weight: NF12Weight)",
+      "embedding": "(ids: torch.Tensor, weight: NF12Weight)",
+      "encode": "(w: torch.Tensor)",
+      "encode_moe": "(w: torch.Tensor)",
+      "fused_moe": "(x: torch.Tensor, w13: NF12MoEWeight | torch.Tensor, w2: NF12MoEWeight | torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor, activation: str='silu', *, expert_map: torch.Tensor | None=None)",
+      "library_path": "(name: str | None=None)",
+      "linear": "(x: torch.Tensor, weight: NF12Weight, bias: torch.Tensor | None=None, *, static_weights: bool=False)",
+      "linear_bf16t": "(x: torch.Tensor, w_bf16t: torch.Tensor, bias: torch.Tensor | None=None)",
+      "load": "()",
+      "moe_align": "(topk_ids: torch.Tensor, num_experts: int)",
+      "moe_combine": "(y: torch.Tensor, topk: int)",
+      "moe_linear": "(x: torch.Tensor, weight: NF12MoEWeight | torch.Tensor, expert_offsets: torch.Tensor, *, gather: torch.Tensor | None=None, gather_div: int=1, scatter: torch.Tensor | None=None, row_scale: torch.Tensor | None=None, zero_fill: bool=False)",
+      "moe_linear_bf16t": "(x: torch.Tensor, w_bf16t: torch.Tensor, expert_offsets: torch.Tensor, *, gather: torch.Tensor | None=None, gather_div: int=1, scatter: torch.Tensor | None=None, row_scale: torch.Tensor | None=None, zero_fill: bool=False)",
+      "moe_silu_mul": "(h: torch.Tensor)",
+      "pack_bf16t": "(w: torch.Tensor)",
+      "pack_bf16t_moe": "(w: torch.Tensor)",
+      "verify_weights": "(model)"
+    },
+    "version": "1.1.0"
+  },
+  "repository": "dphnAI/nf12",
+  "schema": 1,
+  "torch": {
+    "namespaces": {
+      "nf12": [
+        "encode(Tensor w) -> (Tensor packed, Tensor escapes, int exp_base)",
+        "decode(Tensor packed, Tensor escapes, int exp_base) -> Tensor",
+        "linear(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None, *, bool static_weights=False) -> Tensor",
+        "pack_bf16t(Tensor w) -> Tensor",
+        "linear_bf16t(Tensor x, Tensor w_bf16t, Tensor? bias=None) -> Tensor",
+        "embedding(Tensor ids, Tensor packed, Tensor escapes, int exp_base) -> Tensor",
+        "encode_moe(Tensor w) -> (Tensor packed, Tensor escapes, Tensor escape_offsets, Tensor exp_base)",
+        "moe_align(Tensor topk_ids, int num_experts) -> (Tensor sorted, Tensor expert_offsets)",
+        "moe_decode(Tensor packed, Tensor escapes, Tensor escape_offsets, Tensor exp_base) -> Tensor",
+        "moe_linear(Tensor x, Tensor packed, Tensor escapes, Tensor escape_offsets, Tensor exp_base, Tensor expert_offsets, Tensor? gather=None, int gather_div=1, Tensor? scatter=None, Tensor? row_scale=None, bool zero_fill=False) -> Tensor",
+        "moe_linear_bf16t(Tensor x, Tensor w_bf16t, Tensor expert_offsets, Tensor? gather=None, int gather_div=1, Tensor? scatter=None, Tensor? row_scale=None, bool zero_fill=False) -> Tensor",
+        "moe_combine(Tensor y, int topk) -> Tensor",
+        "moe_silu_mul(Tensor h) -> Tensor",
+        "_fused_moe(Tensor x, Tensor packed13, Tensor? escapes13, Tensor? escape_offsets13, Tensor? exp_base13, Tensor packed2, Tensor? escapes2, Tensor? escape_offsets2, Tensor? exp_base2, Tensor topk_weights, Tensor topk_ids, bool zero_fill=False) -> Tensor"
+      ]
+    },
+    "stable_abi": true
+  }
+}
