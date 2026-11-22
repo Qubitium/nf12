@@ -179,6 +179,24 @@ def test_linear_tail_matches_the_twin(m, k):
     assert_bitwise(actual, nm.linear_bf16t(x, twin))
 
 
+@pytest.mark.parametrize("m", [17, 32, 33])
+def test_m4_max_mlx_short_prefill_route(monkeypatch, m):
+    if mx.device_info()["architecture"] != "applegpu_g16s":
+        pytest.skip("M4 Max compute route required")
+    monkeypatch.delenv("NF12_MPS_LINEAR", raising=False)
+    n, k = 528, 2048  # partial output tile with an escape in the final 16 rows
+    w = matrix(n, k, seed=m, escapes=False)
+    w[-1, -1] = 16.0
+    nw = nm.encode(w)
+    x, bias = activations(m, k), activations(n, seed=5)
+    y = nm.linear(x, nw, bias)
+    if m <= 32:
+        assert_bitwise(y, nm.linear_bf16t(x, nm.pack_bf16t(w), bias))
+        close_to_reference(y, x, w, bias)
+    else:
+        assert_bitwise(y, mx.addmm(bias, x, w.T))
+
+
 def test_linear_leading_dims_and_empty():
     w = matrix(32, 64)
     nw = nm.encode(w)

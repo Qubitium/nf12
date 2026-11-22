@@ -178,9 +178,9 @@ def _check_input(x: mx.array, k: int) -> None:
 def linear(x: mx.array, weight: NF12Weight, bias: mx.array | None = None) -> mx.array:
     """``y = x @ W.T (+ bias)``: bf16 ``[..., K]`` -> ``[..., N]``.
 
-    Up to 16 rows run fused decode + multiply kernels (bit-identical to
-    :func:`linear_bf16t`); larger inputs decode the weight and use ``mx.matmul``
-    (SPEC.md 6.5)."""
+    Up to 16 rows run a fused decode-plus-multiply kernel. Larger inputs
+    generally decode slices for MLX matmul. On M4 Max, eligible shapes at
+    17–32 rows also use a fused kernel (see docs/METAL.md)."""
     _check_input(x, weight.shape[1])
     return _load().linear(x, weight.packed, weight.escapes, weight.exp_base, bias)
 

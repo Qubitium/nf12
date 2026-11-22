@@ -89,7 +89,7 @@ static_assert(sizeof(MoeParams) == 64, "MoeParams layout must match moe.metal");
 enum class Route { kSmall, kMma, kGemm, kDecode };
 
 // NF12_MPS_LINEAR=small|mma|gemm|decode forces a route (decode needs NF12) for testing.
-inline Route linear_route(int64_t m, bool nf12) {
+inline Route linear_route(int64_t m, bool nf12, bool prefer_fused_gemm = false) {
   if (const char* env = std::getenv("NF12_MPS_LINEAR"); env != nullptr && *env != '\0') {
     const std::string s(env);
     if (s == "small") return Route::kSmall;
@@ -103,7 +103,7 @@ inline Route linear_route(int64_t m, bool nf12) {
   // beyond that matmul is compute bound and BF16 matmul on decoded slices wins.
   if (m <= 4) return Route::kSmall;
   if (m <= 16) return Route::kMma;
-  return nf12 ? Route::kDecode : Route::kGemm;
+  return nf12 && !prefer_fused_gemm ? Route::kDecode : Route::kGemm;
 }
 
 inline uint32_t small_mt(int64_t m) { return m <= 1 ? 1 : m <= 2 ? 2 : m <= 4 ? 4 : 8; }

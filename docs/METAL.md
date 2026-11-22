@@ -9,8 +9,8 @@ On macOS, nf12 builds a Metal backend instead of CUDA, for two frameworks:
   arrays, and `mlx.nn` modules `NF12Linear` and `NF12Embedding`). `import nf12.mlx`
   does not import PyTorch.
 
-Both frameworks use the same Metal shaders and host launch code. Their fused
-kernels are bit-identical. The encoded format (docs/SPEC.md) is byte-for-byte
+Both frameworks share the Metal shaders and launch code. A matching fused
+route gives bit-identical results. The encoded format (docs/SPEC.md) is byte-for-byte
 the same as on CUDA, so weights move freely between all three.
 
 ```python
@@ -155,18 +155,22 @@ its four groups of a super-atom, exactly as on CUDA.
 The kernels disable fast math and follow SPEC.md section 6: FP32 accumulation, one
 BF16 round-to-nearest-even, fixed reduction orders, and a single kernel template
 per route for both weight sources, so NF12 output is bit-identical to the bf16t twin
-on every fused route, and MLX output is bit-identical to MPS output. The
-decode-then-GEMM route matches the framework's matmul on the decoded weight
-instead (as on CUDA).
+on every fused route. MLX and MPS outputs are bit-identical when both use
+the same fused route. Each framework's decode-then-GEMM route matches its own
+matmul on the decoded weight (as on CUDA).
 
 ## Routing
 
-Routes depend only on shapes. Thresholds were measured on an M5 Max:
+Default routes use the following shape thresholds measured on an M5 Max:
 
 | op | route |
 |---|---|
 | `linear`, `linear_bf16t` | M <= 4 scalar; M <= 16 register MMA; larger M: NF12 decode-then-GEMM, bf16t fused GEMM |
 | `moe_linear` (expected rows per expert r) | r <= 4 scalar; r <= 8 register MMA; larger: fused GEMM |
+
+On M4 Max, MLX uses the fused 32-token GEMM kernel for NF12 linear at 17–32
+tokens with `N >= 512` and `2048 <= K <= 4096`. This avoids decoded-weight
+scratch for those short prefills.
 
 `NF12_MPS_LINEAR=small|mma|gemm|decode` and `NF12_MPS_MOE=small|mma|gemm` force a
 route for both frameworks (tests run the suites under each; the MLX tests set them
