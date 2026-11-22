@@ -17,9 +17,9 @@ import threading
 from pathlib import Path
 
 _METAL = sys.platform == "darwin"
-_LIBRARIES_MPS = ("libnf12_mps.dylib", "nf12.metallib", "libnf12_mps.torch_version")
+_LIBRARIES_MPS = ("libnf12_mps.dylib", "libnf12_mps.torch_version")
 # The MLX extension is a CPython module built against one MLX version.
-_MLX_LIBRARIES = ("_mlx_ext" + (sysconfig.get_config_var("EXT_SUFFIX") or ".so"), "nf12.metallib")
+_MLX_LIBRARIES = ("_mlx_ext" + (sysconfig.get_config_var("EXT_SUFFIX") or ".so"),)
 # CUDA and HIP share the torch op layer, but use different kernel libraries.
 _LIBRARIES_CUDA = ("libnf12.so", "libnf12_torch.so")
 # Validated: ROCm SDK 10.1.0 / HIP 7.16.26385 on gfx1201; see tests/hip/README.md.
@@ -162,12 +162,9 @@ def _ready(directory: Path, libraries: tuple[str, ...]) -> bool:
 
 
 def _build_metal(source: Path, directory: Path, mlx: bool = False) -> None:
-    cmake, ninja, xcrun = shutil.which("cmake"), shutil.which("ninja"), shutil.which("xcrun")
-    if not cmake or not ninja or not xcrun:
-        raise RuntimeError(
-            "nf12: JIT compilation on macOS requires Xcode with the Metal Toolchain "
-            "(xcodebuild -downloadComponent MetalToolchain), CMake 3.26+ and Ninja"
-        )
+    cmake, ninja = shutil.which("cmake"), shutil.which("ninja")
+    if not cmake or not ninja:
+        raise RuntimeError("nf12: JIT compilation on macOS requires Apple Command Line Tools, CMake 3.26+ and Ninja")
     build = directory / "build"
     log = directory / "build.log"
     env = os.environ.copy()
@@ -180,7 +177,7 @@ def _build_metal(source: Path, directory: Path, mlx: bool = False) -> None:
          "-DCMAKE_BUILD_TYPE=Release", "-DNF12_BUILD_NATIVE=ON",
          "-DNF12_BUILD_TORCH=" + ("OFF" if mlx else "ON"), "-DNF12_BUILD_MLX=" + ("ON" if mlx else "OFF"),
          f"-DCMAKE_MAKE_PROGRAM={ninja}", f"-DPython_EXECUTABLE={sys.executable}"],
-        [cmake, "--build", str(build), "--target", "_mlx_ext" if mlx else "nf12_mps", "nf12_metallib"],
+        [cmake, "--build", str(build), "--target", "_mlx_ext" if mlx else "nf12_mps"],
     )
     logging.getLogger(__name__).info("Building NF12 for Metal (%s); log: %s", "MLX" if mlx else "torch", log)
     try:
@@ -290,7 +287,7 @@ def library_directory() -> Path:
 
 
 def mlx_library_directory() -> Path:
-    """Directory of the MLX extension (and nf12.metallib), built for the
+    """Directory of the MLX extension, built for the
     installed MLX on a cache miss. Does not import torch."""
     global _mlx_directory
     if not _METAL:

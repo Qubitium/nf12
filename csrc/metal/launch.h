@@ -7,7 +7,7 @@
 //
 //   E::tensor                          backend array type (at::Tensor, mx::array)
 //   E::out_t                           output handle type (a reference)
-//   void pipeline(const std::string&)  select a kernel from nf12.metallib
+//   void pipeline(const std::string&)  select a kernel from the Metal library
 //   void in(const tensor&, int)        bind an input buffer (with its offset)
 //   void out(out_t, int)               bind an output buffer
 //   template <class T> void bytes(const T&, int)  inline constant bytes
@@ -123,12 +123,12 @@ inline SmallConfig small_config(int64_t n, int64_t k, uint32_t simdgroups = 8) {
           splits};
 }
 
-// Decode-then-GEMM slice size: decoded BF16 slices of at most 16 MiB stay cache
-// resident for the matmul (NF12_MPS_DECODE_SLICE_MB overrides).
+// Decode-then-GEMM slice size: decoded BF16 slices are capped at 64 MiB
+// by default (NF12_MPS_DECODE_SLICE_MB overrides).
 inline int64_t decode_slice_bytes() {
   if (const char* env = std::getenv("NF12_MPS_DECODE_SLICE_MB"); env != nullptr && *env != '\0')
     return std::max<int64_t>(1, std::atoll(env)) << 20;
-  return int64_t(16) << 20;
+  return int64_t(64) << 20;
 }
 inline int64_t decode_slice_rows(int64_t n, int64_t k) {
   return std::min(n, std::max<int64_t>(16, (decode_slice_bytes() / (k * 2)) / 16 * 16));

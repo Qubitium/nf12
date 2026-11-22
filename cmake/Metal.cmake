@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Apple GPU build: nf12.metallib (csrc/metal/*.metal, compiled with xcrun metal),
-# libnf12_mps.dylib, which registers torch.ops.nf12 for the MPS device, and
-# (when MLX and nanobind are importable) the nf12._mlx_ext module for MLX arrays.
-# Both frameworks drive the same kernels through csrc/metal/launch.h.
-# Requires Xcode with the Metal Toolchain component
-# (xcodebuild -downloadComponent MetalToolchain).
+# The MPS and MLX extensions embed the same Metal source and compile it at
+# first GPU use. Apple Command Line Tools can build both host extensions.
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -17,42 +13,23 @@ set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# --- nf12.metallib ----------------------------------------------------------
-find_program(NF12_XCRUN xcrun REQUIRED)
-execute_process(COMMAND "${NF12_XCRUN}" -sdk macosx metal --version
-  RESULT_VARIABLE _nf12_metal_rc OUTPUT_VARIABLE _nf12_metal_version ERROR_VARIABLE _nf12_metal_err
-  OUTPUT_STRIP_TRAILING_WHITESPACE)
-if(NOT _nf12_metal_rc EQUAL 0)
-  message(FATAL_ERROR "nf12: the Metal compiler is unavailable (${_nf12_metal_err}). Install full Xcode and run "
-    "`xcodebuild -downloadComponent MetalToolchain`.")
-endif()
-message(STATUS "nf12: ${_nf12_metal_version}")
-
-# Fast math would violate the numerical contract in SPEC.md section 6.
-set(NF12_METAL_FLAGS -std=metal3.1 -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET} -fno-fast-math -O3 -Wall -Werror)
+# Metal's in-process compiler has no include path for project headers.
+# Concatenate the shared helpers once, before the three kernel families.
 set(_nf12_metal_dir "${CMAKE_CURRENT_SOURCE_DIR}/csrc/metal")
-file(GLOB NF12_METAL_SOURCES CONFIGURE_DEPENDS "${_nf12_metal_dir}/*.metal")
-file(GLOB NF12_METAL_HEADERS CONFIGURE_DEPENDS "${_nf12_metal_dir}/*.h")
-set(_nf12_airs "")
-foreach(_src IN LISTS NF12_METAL_SOURCES)
-  get_filename_component(_name "${_src}" NAME_WE)
-  set(_air "${CMAKE_CURRENT_BINARY_DIR}/metal/${_name}.air")
-  add_custom_command(OUTPUT "${_air}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/metal"
-    COMMAND "${NF12_XCRUN}" -sdk macosx metal ${NF12_METAL_FLAGS} -I "${_nf12_metal_dir}" -c "${_src}" -o "${_air}"
-    DEPENDS "${_src}" ${NF12_METAL_HEADERS}
-    COMMENT "Compiling Metal ${_name}.metal"
-    VERBATIM)
-  list(APPEND _nf12_airs "${_air}")
+set(_nf12_shader_source "")
+foreach(_source IN ITEMS nf12_metal.h linear_core.h codec.metal linear.metal moe.metal)
+  set(_path "${_nf12_metal_dir}/${_source}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_path}")
+  file(READ "${_path}" _contents)
+  string(REGEX REPLACE [=[#pragma once|#include "(nf12_metal|linear_core)[.]h"]=] "" _contents "${_contents}")
+  string(APPEND _nf12_shader_source "#line 1 \"${_source}\"\n${_contents}\n")
 endforeach()
-set(NF12_METALLIB "${CMAKE_CURRENT_BINARY_DIR}/nf12.metallib")
-add_custom_command(OUTPUT "${NF12_METALLIB}"
-  COMMAND "${NF12_XCRUN}" -sdk macosx metallib ${_nf12_airs} -o "${NF12_METALLIB}"
-  DEPENDS ${_nf12_airs}
-  COMMENT "Linking nf12.metallib"
-  VERBATIM)
-add_custom_target(nf12_metallib ALL DEPENDS "${NF12_METALLIB}")
-install(FILES "${NF12_METALLIB}" DESTINATION nf12)
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/nf12_shader_source.h" CONTENT [=[
+#pragma once
+namespace nf12::metal {
+inline constexpr char kShaderSource[] = R"nf12metal(@_nf12_shader_source@)nf12metal";
+}
+]=] @ONLY)
 
 find_package(Python COMPONENTS Interpreter REQUIRED)
 
@@ -79,10 +56,9 @@ if(NOT NF12_BUILD_MLX STREQUAL "OFF")
     find_library(NF12_MLX_LIB mlx PATHS "${NF12_MLX_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
     # MLX's nanobind bindings use the full (not stable) ABI in the "mlx" domain;
     # sharing both lets nf12 accept mx.array directly.
-    nanobind_add_module(_mlx_ext NB_STATIC NB_DOMAIN mlx NOMINSIZE csrc/mlx/nf12_mlx.cpp)
-    add_dependencies(_mlx_ext nf12_metallib)
+    nanobind_add_module(_mlx_ext NB_STATIC NB_DOMAIN mlx NOMINSIZE csrc/mlx/nf12_mlx.cpp csrc/metal/shader_library.mm)
     target_include_directories(_mlx_ext SYSTEM PRIVATE "${NF12_MLX_DIR}/include" "${NF12_MLX_DIR}/include/metal_cpp")
-    target_include_directories(_mlx_ext PRIVATE "${_nf12_metal_dir}")
+    target_include_directories(_mlx_ext PRIVATE "${_nf12_metal_dir}" "${CMAKE_CURRENT_BINARY_DIR}")
     # MLX has no stable C++ ABI; nf12.mlx rebuilds when the runtime version differs.
     target_compile_definitions(_mlx_ext PRIVATE _METAL_ ACCELERATE_NEW_LAPACK NF12_MLX_VERSION="${NF12_MLX_VERSION}")
     target_compile_options(_mlx_ext PRIVATE -Wall -Wextra)
@@ -124,8 +100,8 @@ endforeach()
 
 # MPS stream access (ATen/mps/MPSStream.h) is not part of torch's stable ABI, so
 # this library is built against the installed torch (see python/nf12/_jit.py).
-add_library(nf12_mps SHARED csrc/metal/ops_mps.mm)
-add_dependencies(nf12_mps nf12_metallib)
+add_library(nf12_mps SHARED csrc/metal/ops_mps.mm csrc/metal/shader_library.mm)
+target_include_directories(nf12_mps PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(nf12_mps SYSTEM PRIVATE
   "${NF12_TORCH_DIR}/include" "${NF12_TORCH_DIR}/include/torch/csrc/api/include")
 target_compile_options(nf12_mps PRIVATE -Wall -Wextra -fno-objc-arc)

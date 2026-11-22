@@ -14,8 +14,8 @@ described in the paper. You can read [the spec](docs/SPEC.md) for more info on t
 
 - NVIDIA GPU with SM80 or newer (Ampere and later), an AMD RDNA4 GPU
   (`gfx1200` / `gfx1201`), or an Apple Silicon Mac (macOS 14+).
-- CUDA toolkit 13.0+ for NVIDIA, ROCm with `amdclang++` for AMD, or Xcode with
-  its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`) for Apple.
+- CUDA toolkit 13.0+ for NVIDIA, ROCm with `amdclang++` for AMD, or Apple Command
+  Line Tools for source builds on macOS.
 - A C++ compiler, CMake 3.26+, and Ninja for builds.
 - uv for Python environment management and builds.
 - Python 3.10+ and PyTorch 2.10+ with CUDA, ROCm or MPS support for the Python package;

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """MLX backend (nf12.mlx): byte-exact codec against nf12.reference, NF12 ==
 bf16t twin on the fused routes, and bit parity with the PyTorch MPS backend,
-which runs the same nf12.metallib kernels through the same launch code."""
+which runs the same Metal kernels through the same launch code."""
 
 from __future__ import annotations
 
@@ -163,6 +163,20 @@ def test_linear_parity_with_mps(monkeypatch, route, m):
     assert_bitwise(nm.linear(x, nm.encode(w), bias), expected.cpu())
     expected_t = nf12.linear_bf16t(to_torch(x, "mps"), nf12.pack_bf16t(to_torch(w, "mps")), to_torch(bias, "mps"))
     assert_bitwise(nm.linear_bf16t(x, nm.pack_bf16t(w), bias), expected_t.cpu())
+
+
+@pytest.mark.parametrize("m", [4, 7, 16])
+@pytest.mark.parametrize("k", [192, 320])
+def test_linear_tail_matches_the_twin(m, k):
+    # 33 output blocks leave a tail with and without splitting K. Include
+    # escapes and use the same accumulation configuration for the BF16 twin.
+    n = 528
+    w = matrix(n, k, seed=m)
+    x = activations(m, k, seed=k)
+    nw, twin = nm.encode(w), nm.pack_bf16t(w)
+    actual = nm.linear(x, nw)
+    close_to_reference(actual, x, w)
+    assert_bitwise(actual, nm.linear_bf16t(x, twin))
 
 
 def test_linear_leading_dims_and_empty():

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // torch.ops.nf12 on Apple GPUs (MPS). The schemas match csrc/torch/ops.cpp, so
-// the Python API is unchanged. Kernels live in nf12.metallib (csrc/metal/*.metal)
+// the Python API is unchanged. Kernels are compiled by Metal on first use
 // and are encoded on PyTorch's current MPS stream through its shared compute
 // encoder, so they order with surrounding torch work without extra syncs.
 #include <ATen/ATen.h>
@@ -10,7 +10,6 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-#include <dlfcn.h>
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +24,7 @@
 #include <vector>
 
 #include "launch.h"
+#include "shader_library.h"
 
 namespace nf12_mps {
 namespace {
@@ -35,15 +35,6 @@ using namespace nf12::metal;
 // ---------------------------------------------------------------------------
 // Metal library and pipelines.
 
-std::string metallib_path() {
-  if (const char* env = std::getenv("NF12_METALLIB"); env != nullptr && *env != '\0') return env;
-  Dl_info info{};
-  TORCH_CHECK(dladdr(reinterpret_cast<const void*>(&metallib_path), &info) != 0 && info.dli_fname != nullptr,
-              "nf12: cannot locate libnf12_mps");
-  std::string path(info.dli_fname);
-  return path.substr(0, path.find_last_of('/') + 1) + "nf12.metallib";
-}
-
 id<MTLDevice> mtl_device() { return at::mps::getCurrentMPSStream()->device(); }
 
 id<MTLComputePipelineState> pipeline(const char* name) {
@@ -52,15 +43,9 @@ id<MTLComputePipelineState> pipeline(const char* name) {
   static std::unordered_map<std::string, id<MTLComputePipelineState>> cache;
   std::lock_guard<std::mutex> lock(mu);
   if (auto it = cache.find(name); it != cache.end()) return it->second;
-  if (library == nil) {
-    const std::string path = metallib_path();
-    NSError* error = nil;
-    library = [mtl_device() newLibraryWithURL:[NSURL fileURLWithPath:@(path.c_str())] error:&error];
-    TORCH_CHECK(library != nil, "nf12: failed to load ", path, ": ",
-                error ? [[error localizedDescription] UTF8String] : "unknown error");
-  }
+  if (library == nil) library = static_cast<id<MTLLibrary>>(new_shader_library(mtl_device()));
   id<MTLFunction> fn = [library newFunctionWithName:@(name)];
-  TORCH_CHECK(fn != nil, "nf12: kernel ", name, " not found in nf12.metallib");
+  TORCH_CHECK(fn != nil, "nf12: kernel ", name, " not found in the Metal library");
   NSError* error = nil;
   id<MTLComputePipelineState> pso = [mtl_device() newComputePipelineStateWithFunction:fn error:&error];
   [fn release];

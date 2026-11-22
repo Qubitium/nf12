@@ -3,7 +3,7 @@
 
 The same API as the top-level PyTorch functions (``encode``, ``linear``,
 ``fused_moe`` ...), on ``mlx.core.array``. The kernels are the ones the PyTorch
-MPS backend runs (``nf12.metallib``), encoded on MLX's command encoder by the
+MPS backend runs, encoded on MLX's command encoder by the
 ``nf12._mlx_ext`` extension, so results match ``device="mps"`` bit for bit and
 encoded weights move freely between MLX, MPS and CUDA. Ops are lazy MLX graph
 nodes; only encoding synchronizes. This module does not import PyTorch.

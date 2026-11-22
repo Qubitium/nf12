@@ -416,7 +416,7 @@ def test_decode_route_slices_match(monkeypatch):
     nw = nm.encode(to_mlx(w))
     x, b = to_mlx(randn(40, 1024, seed=9)), to_mlx(randn(2048, seed=10))
     wd = nw.decode()
-    assert bits_equal(nm.linear(x, nw, b), mx.addmm(b, x, wd.T))  # 16 MiB default: one slice
+    assert bits_equal(nm.linear(x, nw, b), mx.addmm(b, x, wd.T))  # the default uses one slice
     monkeypatch.setenv("NF12_MPS_DECODE_SLICE_MB", "1")
     rows = max(16, (1 << 20) // (1024 * 2) // 16 * 16)  # launch.h decode_slice_rows: 512 rows per 1 MiB slice
     assert rows < 2048

@@ -19,13 +19,13 @@ import nf12
 _lock = threading.Lock()
 _loaded = False
 
-# macOS builds the Apple GPU backend: libnf12_mps.dylib plus nf12.metallib.
+# macOS builds the Apple GPU backend: libnf12_mps.dylib with embedded shader source.
 METAL = sys.platform == "darwin"
 TORCH_LIBRARY = "libnf12_mps.dylib" if METAL else "libnf12_torch.so"
 # Files that must sit next to each torch library.
 _COMPANIONS = {"libnf12_torch.so": ("libnf12_hip.so" if torch.version.hip is not None else "libnf12.so",),
-               "libnf12_mps.dylib": ("nf12.metallib", "libnf12_mps.torch_version")}
-_NATIVE = {"libnf12.so", "libnf12_hip.so", "libnf12_torch.so", "libnf12_mps.dylib", "nf12.metallib"}
+               "libnf12_mps.dylib": ("libnf12_mps.torch_version",)}
+_NATIVE = {"libnf12.so", "libnf12_hip.so", "libnf12_torch.so", "libnf12_mps.dylib"}
 
 
 def built_for_this_torch(library: Path) -> bool:

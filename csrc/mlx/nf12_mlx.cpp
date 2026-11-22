@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // NF12 for MLX (Apple GPUs). Every op builds lazy MLX graph nodes whose
-// primitives encode the shared nf12.metallib kernels on MLX's own command
+// primitives encode the shared Metal kernels on MLX's own command
 // encoder through the launches in csrc/metal/launch.h, the same host ABI the
 // PyTorch MPS backend (csrc/metal/ops_mps.mm) uses. Binding through
 // set_input_array/set_output_array keeps MLX's dependency tracking, so
 // nothing synchronizes except encoding (which reads histograms on the host).
-#include <dlfcn.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
@@ -26,6 +25,7 @@
 #include <vector>
 
 #include "launch.h"
+#include "shader_library.h"
 #include "mlx/allocator.h"
 #include "mlx/array.h"
 #include "mlx/backend/metal/device.h"
@@ -45,15 +45,6 @@ namespace {
 
 // ---------------------------------------------------------------------------
 // Metal plumbing.
-
-std::string metallib_path() {
-  if (const char* env = std::getenv("NF12_METALLIB"); env != nullptr && *env != '\0') return env;
-  Dl_info info{};
-  if (dladdr(reinterpret_cast<const void*>(&metallib_path), &info) == 0 || info.dli_fname == nullptr)
-    throw std::runtime_error("nf12: cannot locate the nf12 MLX extension");
-  std::string path(info.dli_fname);
-  return path.substr(0, path.find_last_of('/') + 1) + "nf12.metallib";
-}
 
 // Encoder adapter for the shared launches in launch.h.
 struct MlxEncoder {
@@ -115,10 +106,8 @@ class Kernel : public mx::Primitive {
     for (array& out : outputs) out.set_data(mx::allocator::malloc(out.nbytes()));
     const mx::Stream& s = stream();
     mx::metal::Device& d = mx::metal::device(s.device);
-    static const std::string path = metallib_path();  // fixed for the process
-    MTL::Library* lib = d.get_library("nf12", path);
-    if (lib == nullptr) throw std::runtime_error("nf12: failed to load " + path);
-    MlxEncoder e{d, mx::metal::get_command_encoder(s), lib};
+    static const auto lib = NS::TransferPtr(static_cast<MTL::Library*>(new_shader_library(d.mtl_device())));
+    MlxEncoder e{d, mx::metal::get_command_encoder(s), lib.get()};
     body_(e, inputs, outputs);
   }
 

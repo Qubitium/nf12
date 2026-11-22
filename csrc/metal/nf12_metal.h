@@ -6,7 +6,7 @@
 //   R0 = (row g,     cols 2t, 2t+1)    R2 = (row g,     cols 2t+8, 2t+9)
 //   R1 = (row g + 8, cols 2t, 2t+1)    R3 = (row g + 8, cols 2t+8, 2t+9)
 // of atom j (columns 16j..16j+15) of a 16 x 64 super-atom.
-// Kernels are compiled with -fno-fast-math (SPEC.md section 6).
+// Kernels are compiled with fast math disabled (SPEC.md section 6).
 #pragma once
 
 #include <metal_stdlib>
