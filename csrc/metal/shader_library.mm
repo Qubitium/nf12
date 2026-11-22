@@ -13,10 +13,11 @@ namespace nf12::metal {
 
 bool supports_tensor_linear(void* device) {
   if (@available(macOS 27, *)) {
-    @autoreleasepool {
-      id<MTLDevice> gpu = static_cast<id<MTLDevice>>(device);
-      return [gpu.name isEqualToString:@"Apple M5 Ultra"];
-    }
+    // Apple10 introduces matrix acceleration for TensorOps. Use the enum
+    // value so the host extension can also build against older SDKs.
+    constexpr auto tensor_accelerator_family = static_cast<MTLGPUFamily>(1010);  // MTLGPUFamilyApple10
+    id<MTLDevice> gpu = static_cast<id<MTLDevice>>(device);
+    return [gpu supportsFamily:tensor_accelerator_family];
   }
   return false;
 }

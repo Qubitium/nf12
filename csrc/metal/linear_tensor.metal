@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// M5 Ultra dense linear using Metal 4 tensor operations. The runtime
+// Dense linear using Metal 4 tensor operations. The runtime
 // compiler prepends nf12_metal.h and builds this as a separate library.
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 

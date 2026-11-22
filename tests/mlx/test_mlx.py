@@ -5,6 +5,7 @@ which runs the same Metal kernels through the same launch code."""
 
 from __future__ import annotations
 
+import ctypes
 import subprocess
 import sys
 from platform import mac_ver
@@ -26,11 +27,6 @@ from portable_random import generator, normalized, rand, randn  # noqa: E402
 
 MPS = torch.backends.mps.is_available()
 requires_mps = pytest.mark.skipif(not MPS, reason="PyTorch MPS required for parity")
-requires_m5_ultra = pytest.mark.skipif(
-    mx.device_info(mx.gpu)["device_name"] != "Apple M5 Ultra"
-    or int(mac_ver()[0].split(".")[0]) < 27,
-    reason="M5 Ultra with Metal 4.1 required",
-)
 LINEAR_ROUTES = ("small", "mma", "gemm", "decode")
 MOE_ROUTES = ("small", "mma", "gemm")
 
@@ -214,14 +210,38 @@ def test_mlx_short_prefill_route(monkeypatch, m, n, k, override, fused):
         assert_bitwise(y, mx.addmm(bias, x, w.T))
 
 
-@requires_m5_ultra
+@pytest.fixture(scope="module")
+def accelerated_tensor_gpu():
+    if sys.platform != "darwin" or int(mac_ver()[0].split(".")[0]) < 27:
+        pytest.skip("Metal 4.1 requires macOS 27 or later")
+    # Query the OS directly so a broken NF12 gate cannot skip this test.
+    metal = ctypes.CDLL("/System/Library/Frameworks/Metal.framework/Metal")
+    objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+    metal.MTLCreateSystemDefaultDevice.argtypes = ()
+    metal.MTLCreateSystemDefaultDevice.restype = ctypes.c_void_p
+    objc.sel_registerName.argtypes = (ctypes.c_char_p,)
+    objc.sel_registerName.restype = ctypes.c_void_p
+    objc.objc_msgSend.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long)
+    objc.objc_msgSend.restype = ctypes.c_bool
+    objc.objc_release.argtypes = (ctypes.c_void_p,)
+    objc.objc_release.restype = None
+    device = metal.MTLCreateSystemDefaultDevice()
+    try:
+        family_apple10 = 1010
+        selector = objc.sel_registerName(b"supportsFamily:")
+        if not objc.objc_msgSend(device, selector, family_apple10):
+            pytest.skip("Metal Apple10 family capability required")
+    finally:
+        objc.objc_release(device)
+
+
 @requires_mps
 @pytest.mark.parametrize("m,n,k,has_bias", [
     (32, 4112, 2048, True),
     (31, 4112, 4160, False),
     (65, 4096, 4160, True),
 ])
-def test_tensor_prefill_matches_twin_and_mps(monkeypatch, m, n, k, has_bias):
+def test_tensor_prefill_matches_twin_and_mps(accelerated_tensor_gpu, monkeypatch, m, n, k, has_bias):
     monkeypatch.delenv("NF12_MPS_LINEAR", raising=False)
     monkeypatch.delenv("NF12_METALLIB", raising=False)
     w = matrix(n, k, escapes=False)

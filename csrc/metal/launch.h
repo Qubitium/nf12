@@ -88,7 +88,7 @@ static_assert(sizeof(MoeParams) == 64, "MoeParams layout must match moe.metal");
 
 enum class Route { kSmall, kMma, kGemm, kDecode, kTensor };
 
-// Metal 4 tiles on M5 Ultra. Each simdgroup owns 16 output columns. Longer
+// Metal 4 TensorOps tiles. Each simdgroup owns 16 output columns. Longer
 // reductions split K within a threadgroup to keep more of the GPU occupied.
 struct TensorConfig {
   uint32_t tokens;

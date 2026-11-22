@@ -95,7 +95,7 @@ A macOS wheel is CPython specific because of the MLX module.
 | `csrc/metal/linear_core.h` | Fused decode + multiply cores shared by dense and MoE kernels |
 | `csrc/metal/codec.metal` | Encode (analyze, count, write), decode (dense and stacked experts), bf16t packing, embedding |
 | `csrc/metal/linear.metal` | Dense `linear` / `linear_bf16t` kernels |
-| `csrc/metal/linear_tensor.metal` | Metal 4 dense prefill kernels for M5 Ultra |
+| `csrc/metal/linear_tensor.metal` | Metal 4 TensorOps dense prefill kernels |
 | `csrc/metal/moe.metal` | `moe_align`, tile schedule, grouped linear, `moe_combine`, `moe_silu_mul` |
 | `csrc/metal/launch.h` | Host ABI shared by both frameworks: kernel names, buffer indices, parameter structs, grid geometry, routing |
 | `csrc/metal/ops_mps.mm` | `torch.ops.nf12` schemas and MPS implementations |
@@ -176,8 +176,9 @@ with `N >= 4096` and `2048 <= K <= 16384`. MLX also uses it with
 threadgroup memory and accumulates in FP32. The wider range was measured
 on M6. The fused route avoids decoded-weight scratch.
 
-On M5 Ultra with macOS 27 or later, both backends use Metal 4 TensorOps for
-selected dense shapes at 16–128 tokens. Each SIMD group decodes a BF16 weight
+On macOS 27 or later, both backends use Metal 4.1 TensorOps for selected
+dense shapes at 16–128 tokens when Metal reports Apple10 family support.
+Each SIMD group decodes a BF16 weight
 tile for the GPU matrix units and accumulates in FP32. Long reductions use
 ordered split-K inside the threadgroup. Explicit route overrides and
 `NF12_METALLIB` use the standard kernels.
