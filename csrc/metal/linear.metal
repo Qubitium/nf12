@@ -134,11 +134,62 @@ inline void linear_mma(Src src, device const ushort* x, device const ushort* bia
 }
 
 // ---------------------------------------------------------------------------
+// Keep the two operand slabs in BF16 and the accumulator in FP32.
+// The BF16 slab and FP32 output tile share threadgroup memory.
+struct LinearGemmSlab {
+  bfloat w[kGemmBN * kGemmLd];
+  bfloat x[kGemmBM * kGemmLd];
+};
+union LinearGemmSmem {
+  LinearGemmSlab slab;
+  float c[kGemmBN * kGemmCLd];
+};
+
+template <typename Src>
+inline void linear_gemm_slab(Src src, ulong sa, bool valid, device const ushort* x, threadgroup const ulong* xoff,
+                            uint kb, threadgroup LinearGemmSlab& slab, thread GemmAcc& acc,
+                            uint sg, uint lane, uint tid) {
+  const uint row = 16 * sg + (lane >> 2);
+  const uint pair = lane & 3u;
+  threadgroup uint* w0 = reinterpret_cast<threadgroup uint*>(slab.w + row * kGemmLd) + pair;
+  threadgroup uint* w1 = w0 + 8 * kGemmLd / 2;
+  uint r[4][4] = {};
+  if (valid) src.load(sa, lane, r);
+  for (uint j = 0; j < 4; ++j) {
+    w0[8 * j] = r[j][0];
+    w0[8 * j + 4] = r[j][2];
+    w1[8 * j] = r[j][1];
+    w1[8 * j + 4] = r[j][3];
+  }
+
+  for (uint i = tid; i < kGemmBM * (kSuperAtomCols / 2); i += 32 * kGemmSimdgroups) {
+    const uint m = i / (kSuperAtomCols / 2), col = i % (kSuperAtomCols / 2);
+    const ulong off = xoff[m];
+    uint bits = 0;
+    if (off != ~0ul)
+      bits = *reinterpret_cast<device const uint*>(x + off + ulong(kb) * kSuperAtomCols + 2 * col);
+    reinterpret_cast<threadgroup uint*>(slab.x + m * kGemmLd)[col] = bits;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint kk = 0; kk < kSuperAtomCols; kk += 8) {
+    simdgroup_bfloat8x8 a0, a1;
+    simdgroup_load(a0, slab.w + (16 * sg) * kGemmLd + kk, kGemmLd);
+    simdgroup_load(a1, slab.w + (16 * sg + 8) * kGemmLd + kk, kGemmLd);
+    for (uint c = 0; c < kGemmBM / 8; ++c) {
+      simdgroup_bfloat8x8 b;
+      simdgroup_load(b, slab.x + (8 * c) * kGemmLd + kk, kGemmLd, ulong2(0, 0), true);
+      simdgroup_multiply_accumulate(acc[0][c], a0, b, acc[0][c]);
+      simdgroup_multiply_accumulate(acc[1][c], a1, b, acc[1][c]);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
 // Large M. Threadgroup (x, y) computes y rows [32 y, 32 y + 32) x columns [64 x, 64 x + 64).
 template <typename Src>
 inline void linear_gemm(Src src, device const ushort* x, device const ushort* bias, device ushort* y,
                         constant LinearParams& p, uint2 tg, uint sg, uint lane, uint tid,
-                        threadgroup GemmSmem& sm, threadgroup ulong* xoff) {
+                        threadgroup LinearGemmSmem& sm, threadgroup ulong* xoff) {
   const uint n0 = tg.x * kGemmBN, m0 = tg.y * kGemmBM;
   if (tid < kGemmBM) xoff[tid] = m0 + tid < p.m ? ulong(m0 + tid) * p.ldx : ~0ul;
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -147,13 +198,16 @@ inline void linear_gemm(Src src, device const ushort* x, device const ushort* bi
   GemmAcc acc;
   gemm_zero(acc);
   for (uint kb = 0; kb < p.k_blocks; ++kb)
-    gemm_slab(src, ulong(nb) * p.k_blocks + kb, valid, x, xoff, kb, sm, acc, sg, lane, tid);
-  threadgroup const float* c = gemm_stage(acc, sm, sg);
+    linear_gemm_slab(src, ulong(nb) * p.k_blocks + kb, valid, x, xoff, kb, sm.slab, acc, sg, lane, tid);
+  for (uint h = 0; h < 2; ++h)
+    for (uint q = 0; q < kGemmBM / 8; ++q)
+      simdgroup_store(acc[h][q], sm.c + (16 * sg + 8 * h) * kGemmCLd + 8 * q, kGemmCLd);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint i = tid; i < kGemmBN * kGemmBM; i += 32 * kGemmSimdgroups) {
     const uint nl = i % kGemmBN, ml = i / kGemmBN;
     const uint n = n0 + nl, m = m0 + ml;
     if (n >= p.n || m >= p.m) continue;
-    float s = c[nl * kGemmCLd + ml];
+    float s = sm.c[nl * kGemmCLd + ml];
     if (p.has_bias) s += bf16_to_float(bias[n]);
     y[ulong(m) * p.ldy + n] = float_to_bf16(s);
   }
@@ -197,7 +251,7 @@ NF12_THREADS(32 * kGemmSimdgroups) kernel void nf12_linear_gemm_nf12(device cons
                                   uint sg [[simdgroup_index_in_threadgroup]],
                                   uint lane [[thread_index_in_simdgroup]],
                                   uint tid [[thread_index_in_threadgroup]]) {
-  threadgroup GemmSmem sm;
+  threadgroup LinearGemmSmem sm;
   threadgroup ulong xoff[kGemmBM];
   linear_gemm(NF12Source{packed, escapes, exp_base_x4(exp_base[0])}, x, bias, y, p, tg, sg, lane, tid, sm, xoff);
 }
@@ -209,7 +263,7 @@ NF12_THREADS(32 * kGemmSimdgroups) kernel void nf12_linear_gemm_bf16t(device con
                                    uint sg [[simdgroup_index_in_threadgroup]],
                                    uint lane [[thread_index_in_simdgroup]],
                                    uint tid [[thread_index_in_threadgroup]]) {
-  threadgroup GemmSmem sm;
+  threadgroup LinearGemmSmem sm;
   threadgroup ulong xoff[kGemmBM];
   linear_gemm(Bf16tSource{packed}, x, bias, y, p, tg, sg, lane, tid, sm, xoff);
 }

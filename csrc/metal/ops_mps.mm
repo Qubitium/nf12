@@ -277,6 +277,13 @@ void decode_gemm(const WeightView& w, const Tensor& x2, const std::optional<Tens
   }
 }
 
+// One fused GEMM tile avoids writing and rereading the decoded weight
+// when output width offers enough threadgroups to fill the GPU.
+Route dense_linear_route(int64_t m, int64_t n, int64_t k, bool nf12) {
+  const bool fused_prefill = m > 16 && m <= kGemmBM && n >= 4096 && k >= 2048 && k <= 16384;
+  return linear_route(m, nf12, fused_prefill);
+}
+
 // `nf12_view` is null for bf16t weights.
 Tensor run_linear(const Tensor& x, const Tensor& packed, int64_t n, int64_t k, const std::optional<Tensor>& bias_in,
                   const char* op, const WeightView* nf12_view) {
@@ -299,7 +306,7 @@ Tensor run_linear(const Tensor& x, const Tensor& packed, int64_t n, int64_t k, c
   }
   Tensor y2 = y.view({m, n});
   const bool nf12 = nf12_view != nullptr;
-  const Route route = linear_route(m, nf12);
+  const Route route = dense_linear_route(m, n, k, nf12);
   if (route == Route::kDecode) {
     decode_gemm(*nf12_view, x2, bias, y2);
   } else {
@@ -315,7 +322,7 @@ Tensor run_linear(const Tensor& x, const Tensor& packed, int64_t n, int64_t k, c
 // for the fused kernels (the MPS counterpart of nf12_linear_decode_gemm_rows).
 int64_t decode_gemm_rows(int64_t m, int64_t n, int64_t k) {
   check_shape(n, k, "decode_gemm_rows");
-  if (m <= 0 || linear_route(m, true) != Route::kDecode) return 0;
+  if (m <= 0 || dense_linear_route(m, n, k, true) != Route::kDecode) return 0;
   return decode_slice_rows(n, k);
 }
 

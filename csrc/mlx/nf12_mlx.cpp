@@ -338,7 +338,8 @@ array run_linear(const array& x, const array& packed, int64_t n, int64_t k, cons
   const bool nf12 = nf12_view != nullptr;
   // A single 32-token tile can use the packed weights directly without
   // writing and rereading a decoded BF16 slice for MLX's matmul.
-  const bool fused_prefill = m > 16 && m <= kGemmBM && n >= 512 && k >= 2048 && k <= 4096;
+  const bool fused_prefill = m > 16 && m <= kGemmBM && k >= 2048 &&
+                             ((n >= 512 && k <= 4096) || (n >= 4096 && k <= 16384));
   const Route route = linear_route(m, nf12, fused_prefill);
   array y = [&]() -> array {
     if (route == Route::kDecode) {

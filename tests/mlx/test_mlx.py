@@ -186,6 +186,9 @@ def test_linear_tail_matches_the_twin(m, k):
     (17, 496, 2048, None, False),
     (17, 528, 1984, None, False),
     (17, 528, 4160, None, False),
+    (32, 4096, 8192, None, True),
+    (17, 4080, 4160, None, False),
+    (32, 4096, 16448, None, False),
     (17, 528, 2048, "decode", False),
 ])
 def test_mlx_short_prefill_route(monkeypatch, m, n, k, override, fused):

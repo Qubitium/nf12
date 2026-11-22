@@ -139,8 +139,9 @@ its four groups of a super-atom, exactly as on CUDA.
   8x8 quarter of an atom, so each A fragment is one `simd_shuffle` from lane
   `4 fm + fn / 2`; activations load straight into B fragments. Threadgroup memory
   is used only to combine split-K partials.
-- **Large M (GEMM)**: a 64-row weight tile is decoded to threadgroup memory (FP32,
-  exact) and multiplied with `simdgroup_float8x8`. Used for bf16t and MoE at large T.
+- **Fused GEMM**: a 64-row weight tile is decoded into threadgroup memory.
+  Dense linear stages BF16 operands and MoE stages FP32 operands. Both
+  accumulate in FP32.
 - **Decode-then-GEMM** (SPEC.md 6.5): NF12 `linear` at large M decodes row slices
   of up to 64 MiB by default, then calls the framework's BF16 matmul or addmm
   on each slice.
@@ -168,9 +169,11 @@ Default routes use the following shape thresholds measured on an M5 Max:
 | `linear`, `linear_bf16t` | M <= 4 scalar; M <= 16 register MMA; larger M: NF12 decode-then-GEMM, bf16t fused GEMM |
 | `moe_linear` (expected rows per expert r) | r <= 4 scalar; r <= 8 register MMA; larger: fused GEMM |
 
-MLX uses the fused 32-token GEMM kernel for NF12 linear at 17–32 tokens
-with `N >= 512` and `2048 <= K <= 4096`. This avoids decoded-weight scratch
-for those short prefills. These thresholds were measured on M4 Max.
+MLX and MPS use the fused GEMM kernel for NF12 linear at 17–32 tokens
+with `N >= 4096` and `2048 <= K <= 16384`. MLX also uses it with
+`N >= 512` and `2048 <= K <= 4096`. The kernel stages BF16 operands in
+threadgroup memory and accumulates in FP32. The wider range was measured
+on M6. The fused route avoids decoded-weight scratch.
 
 `NF12_MPS_LINEAR=small|mma|gemm|decode` and `NF12_MPS_MOE=small|mma|gemm` force a
 route for both frameworks (tests run the suites under each; the MLX tests set them

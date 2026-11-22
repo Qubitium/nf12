@@ -164,6 +164,37 @@ def test_linear_bias_and_escapes(m):
     assert_close_to_reference(y, x, w, bias)
 
 
+@pytest.mark.skipif(DEV != "mps", reason="requires MPS")
+@pytest.mark.parametrize("m,n,k,fused,override", [
+    (17, 4112, 2048, True, None),
+    (32, 4096, 4096, True, None),
+    (32, 4096, 14336, True, None),
+    (33, 4096, 2048, False, None),
+    (32, 4080, 2048, False, None),
+    (17, 4096, 2048, False, "decode"),
+])
+def test_mps_short_prefill_route(monkeypatch, m, n, k, fused, override):
+    if override is None:
+        monkeypatch.delenv("NF12_MPS_LINEAR", raising=False)
+    else:
+        monkeypatch.setenv("NF12_MPS_LINEAR", override)
+    assert torch_op_routes(m, n, k) != fused
+    w = weight(n, k)
+    w[-1, -1] = 16
+    nw = nf12.encode(w)
+    x = activations(m, k)
+    bias = activations(n)
+    got = nf12.linear(x, nw, bias)
+    if fused:
+        assert_bitwise(got, nf12.linear_bf16t(x, nf12.pack_bf16t(w), bias))
+        assert_close_to_reference(got, x, w, bias)
+    else:
+        rows = torch.ops.nf12._mps_decode_gemm_rows(m, n, k)
+        expected = torch.cat([torch.addmm(bias[i:i + rows], x, w[i:i + rows].t())
+                              for i in range(0, n, rows)], dim=-1)
+        assert_bitwise(got, expected)
+
+
 def test_linear_leading_dims_and_empty(dense_ops):
     encode, linear = dense_ops
     n, k = 256, 512
