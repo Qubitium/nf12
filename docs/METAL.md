@@ -95,6 +95,7 @@ A macOS wheel is CPython specific because of the MLX module.
 | `csrc/metal/linear_core.h` | Fused decode + multiply cores shared by dense and MoE kernels |
 | `csrc/metal/codec.metal` | Encode (analyze, count, write), decode (dense and stacked experts), bf16t packing, embedding |
 | `csrc/metal/linear.metal` | Dense `linear` / `linear_bf16t` kernels |
+| `csrc/metal/linear_tensor.metal` | Metal 4 dense prefill kernels for M5 Ultra |
 | `csrc/metal/moe.metal` | `moe_align`, tile schedule, grouped linear, `moe_combine`, `moe_silu_mul` |
 | `csrc/metal/launch.h` | Host ABI shared by both frameworks: kernel names, buffer indices, parameter structs, grid geometry, routing |
 | `csrc/metal/ops_mps.mm` | `torch.ops.nf12` schemas and MPS implementations |
@@ -175,6 +176,12 @@ with `N >= 4096` and `2048 <= K <= 16384`. MLX also uses it with
 threadgroup memory and accumulates in FP32. The wider range was measured
 on M6. The fused route avoids decoded-weight scratch.
 
+On M5 Ultra with macOS 27 or later, both backends use Metal 4 TensorOps for
+selected dense shapes at 16–128 tokens. Each SIMD group decodes a BF16 weight
+tile for the GPU matrix units and accumulates in FP32. Long reductions use
+ordered split-K inside the threadgroup. Explicit route overrides and
+`NF12_METALLIB` use the standard kernels.
+
 `NF12_MPS_LINEAR=small|mma|gemm|decode` and `NF12_MPS_MOE=small|mma|gemm` force a
 route for both frameworks (tests run the suites under each; the MLX tests set them
 per test, since MLX reads them when an op is built). `torch.ops.nf12._mps_decode_gemm_rows(m, n, k)`
@@ -241,8 +248,7 @@ machine and device. A new test should fail on the code it guards; check that by
 running it against the unfixed code.
 
 Bit-exact assertions are only made where nf12's code fixes the arithmetic order:
-nf12's own kernels (routes depend on shapes and environment variables, never on
-the GPU, and shader compilation disables fast math), or the same framework call
+nf12's own kernels under the same configuration with fast math disabled, or the same framework call
 at the same shape on the same inputs. The decode route's GEMM belongs to the
 framework (MPS or MLX), which chooses its kernel by GPU and shape, so it is
 compared with a tolerance against anything else. A bit-exact pass on one Apple GPU

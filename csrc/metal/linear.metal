@@ -6,16 +6,6 @@
 
 using namespace nf12;
 
-struct LinearParams {
-  ulong ldx, ldy;
-  uint m, n, k_blocks;
-  uint kb_per_split;  // small M: super-atoms per K split
-  uint row_blocks;    // small M: 16-row blocks per threadgroup (RB)
-  uint splits;        // small M: power-of-two K splits per row block; RB * KS <= kSmallMaxSimdgroups
-  uint has_bias;
-  uint reserved;  // was base_x4; exp_base is buffer 6 so frameworks can pass it as data
-};
-
 constant constexpr uint kSmallMaxSimdgroups = 16;
 
 inline void store_linear(device ushort* y, device const ushort* bias, constant LinearParams& p,

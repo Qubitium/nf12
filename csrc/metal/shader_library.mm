@@ -11,25 +11,43 @@
 
 namespace nf12::metal {
 
-void* new_shader_library(void* device) {
+bool supports_tensor_linear(void* device) {
+  if (@available(macOS 27, *)) {
+    @autoreleasepool {
+      id<MTLDevice> gpu = static_cast<id<MTLDevice>>(device);
+      return [gpu.name isEqualToString:@"Apple M5 Ultra"];
+    }
+  }
+  return false;
+}
+
+void* new_shader_library(void* device, bool tensor) {
   @autoreleasepool {
     id<MTLDevice> gpu = static_cast<id<MTLDevice>>(device);
     NSError* error = nil;
     id<MTLLibrary> library;
     const char* path = std::getenv("NF12_METALLIB");
-    const bool precompiled = path != nullptr && *path != '\0';
+    const bool precompiled = !tensor && path != nullptr && *path != '\0';
     if (precompiled) {
       library = [gpu newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&error];
     } else {
       MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
-      options.languageVersion = MTLLanguageVersion3_1;
-      // Metal 3.1 uses fastMathEnabled. Keep the flag for the macOS 14
-      // deployment target and preserve the offline build's precise math.
+      // Use the numeric value to allow SDKs predating Metal 4.1.
+      options.languageVersion = tensor ? static_cast<MTLLanguageVersion>((4 << 16) + 1) : MTLLanguageVersion3_1;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
       options.fastMathEnabled = NO;
 #pragma clang diagnostic pop
-      library = [gpu newLibraryWithSource:@(kShaderSource) options:options error:&error];
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+      if (tensor) {
+        if (@available(macOS 15, *)) {
+          options.mathMode = MTLMathModeSafe;
+          options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
+        }
+      }
+#endif
+      const char* source = tensor ? kTensorShaderSource : kShaderSource;
+      library = [gpu newLibraryWithSource:@(source) options:options error:&error];
       [options release];
     }
     if (library == nil) {
@@ -37,7 +55,7 @@ void* new_shader_library(void* device) {
       throw std::runtime_error("nf12: failed to create Metal library from " + source + ": " +
                                (error ? error.localizedDescription.UTF8String : "unknown error"));
     }
-    library.label = @"nf12";
+    library.label = tensor ? @"nf12_tensor" : @"nf12";
     return library;
   }
 }

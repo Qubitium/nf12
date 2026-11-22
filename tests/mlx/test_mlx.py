@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from platform import mac_ver
 
 import numpy as np
 import pytest
@@ -25,6 +26,11 @@ from portable_random import generator, normalized, rand, randn  # noqa: E402
 
 MPS = torch.backends.mps.is_available()
 requires_mps = pytest.mark.skipif(not MPS, reason="PyTorch MPS required for parity")
+requires_m5_ultra = pytest.mark.skipif(
+    mx.device_info(mx.gpu)["device_name"] != "Apple M5 Ultra"
+    or int(mac_ver()[0].split(".")[0]) < 27,
+    reason="M5 Ultra with Metal 4.1 required",
+)
 LINEAR_ROUTES = ("small", "mma", "gemm", "decode")
 MOE_ROUTES = ("small", "mma", "gemm")
 
@@ -206,6 +212,34 @@ def test_mlx_short_prefill_route(monkeypatch, m, n, k, override, fused):
         close_to_reference(y, x, w, bias)
     else:
         assert_bitwise(y, mx.addmm(bias, x, w.T))
+
+
+@requires_m5_ultra
+@requires_mps
+@pytest.mark.parametrize("m,n,k,has_bias", [
+    (32, 4112, 2048, True),
+    (31, 4112, 4160, False),
+    (65, 4096, 4160, True),
+])
+def test_tensor_prefill_matches_twin_and_mps(monkeypatch, m, n, k, has_bias):
+    monkeypatch.delenv("NF12_MPS_LINEAR", raising=False)
+    monkeypatch.delenv("NF12_METALLIB", raising=False)
+    w = matrix(n, k, escapes=False)
+    w[-1, -1] = 16.0
+    nw = nm.encode(w)
+    assert nw.escapes.shape[0] > 0
+    padded = activations(m, k + 64)
+    x = padded[:, 32:32 + k]
+    bias = activations(n, seed=5) if has_bias else None
+    y = nm.linear(x, nw, bias)
+    assert_bitwise(y, nm.linear_bf16t(x, nm.pack_bf16t(w), bias))
+    close_to_reference(y, x, w, bias)
+
+    tw = nf12.encode(to_torch(w, "mps"))
+    tx = to_torch(padded, "mps")[:, 32:32 + k]
+    tb = None if bias is None else to_torch(bias, "mps")
+    assert torch.ops.nf12._mps_decode_gemm_rows(m, n, k) == 0
+    assert_bitwise(y, nf12.linear(tx, tw, tb).cpu())
 
 
 def test_linear_leading_dims_and_empty():

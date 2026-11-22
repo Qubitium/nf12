@@ -24,10 +24,21 @@ foreach(_source IN ITEMS nf12_metal.h linear_core.h codec.metal linear.metal moe
   string(REGEX REPLACE [=[#pragma once|#include "(nf12_metal|linear_core)[.]h"]=] "" _contents "${_contents}")
   string(APPEND _nf12_shader_source "#line 1 \"${_source}\"\n${_contents}\n")
 endforeach()
+set(_tensor_source "${_nf12_metal_dir}/linear_tensor.metal")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_tensor_source}")
+file(READ "${_nf12_metal_dir}/nf12_metal.h" _tensor_helpers)
+string(REPLACE "#pragma once" "" _tensor_helpers "${_tensor_helpers}")
+file(READ "${_tensor_source}" _tensor_kernel)
 file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/nf12_shader_source.h" CONTENT [=[
 #pragma once
 namespace nf12::metal {
 inline constexpr char kShaderSource[] = R"nf12metal(@_nf12_shader_source@)nf12metal";
+inline constexpr char kTensorShaderSource[] = R"nf12metal(
+#line 1 "nf12_metal.h"
+@_tensor_helpers@
+#line 1 "linear_tensor.metal"
+@_tensor_kernel@
+)nf12metal";
 }
 ]=] @ONLY)
 

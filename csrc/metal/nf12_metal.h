@@ -26,6 +26,16 @@ constant constexpr uint kMaxExpBase = 120;
 // (launch.h also checks maxTotalThreadsPerThreadgroup before each dispatch).
 #define NF12_THREADS(n) [[max_total_threads_per_threadgroup(n)]]
 
+struct LinearParams {
+  ulong ldx, ldy;
+  uint m, n, k_blocks;
+  uint kb_per_split;
+  uint row_blocks;
+  uint splits;
+  uint has_bias;
+  uint reserved;
+};
+
 struct Group {
   uint meta, lo0, lo1;
 };

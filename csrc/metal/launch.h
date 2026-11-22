@@ -84,12 +84,31 @@ struct MoeParams {  // moe.metal MoeParams
 static_assert(sizeof(MoeParams) == 64, "MoeParams layout must match moe.metal");
 
 // ---------------------------------------------------------------------------
-// Routing. Routes depend only on shapes (SPEC.md 6.5, 9.3).
+// Routing. Routes depend on shapes and architecture (SPEC.md 6.5, 9.3).
 
-enum class Route { kSmall, kMma, kGemm, kDecode };
+enum class Route { kSmall, kMma, kGemm, kDecode, kTensor };
+
+// Metal 4 tiles on M5 Ultra. Each simdgroup owns 16 output columns. Longer
+// reductions split K within a threadgroup to keep more of the GPU occupied.
+struct TensorConfig {
+  uint32_t tokens;
+  uint32_t splits;
+};
+inline TensorConfig tensor_config(int64_t m, int64_t k) {
+  return {m < 32 ? 16u : m < 64 ? 32u : 64u, k > 4096 ? 4u : 1u};
+}
+
+inline bool tensor_prefill(int64_t m, int64_t n, int64_t k) {
+  if (m < 16 || m > 128 || n < 512 || k < 2048 || k > 16384) return false;
+  if (n < 4096)
+    return k <= 4096 && (m == 16 || m == 32 || m == 64 || (n <= 1024 && m > 64));
+  if (n > 32768) return m == 16 || (m >= 32 && m <= 64);
+  return true;
+}
 
 // NF12_MPS_LINEAR=small|mma|gemm|decode forces a route (decode needs NF12) for testing.
-inline Route linear_route(int64_t m, bool nf12, bool prefer_fused_gemm = false) {
+inline Route linear_route(int64_t m, int64_t n, int64_t k, bool nf12, bool tensor = false,
+                          bool prefer_fused_gemm = false) {
   if (const char* env = std::getenv("NF12_MPS_LINEAR"); env != nullptr && *env != '\0') {
     const std::string s(env);
     if (s == "small") return Route::kSmall;
@@ -97,6 +116,10 @@ inline Route linear_route(int64_t m, bool nf12, bool prefer_fused_gemm = false) 
     if (s == "gemm") return Route::kGemm;
     if (s == "decode") return nf12 ? Route::kDecode : Route::kGemm;
     throw std::invalid_argument("nf12: NF12_MPS_LINEAR must be small, mma, gemm or decode, got " + s);
+  }
+  if (tensor && tensor_prefill(m, n, k)) {
+    const char* lib = std::getenv("NF12_METALLIB");
+    if (lib == nullptr || *lib == '\0') return Route::kTensor;
   }
   // Measured on an M5 Max (14336 x 4096 and 4096 x 14336): the scalar GEMV
   // streams NF12 at DRAM bandwidth to M = 4, the register-MMA kernel to M = 16;
@@ -350,7 +373,7 @@ void launch_embedding(E& e, const typename E::tensor& packed, const typename E::
   e.dispatch(ceil_div(x_threads, tx), num_ids, 1, tx, 1, 1);
 }
 
-// Fused linear (route kSmall, kMma or kGemm): y [m, n] (row stride n) =
+// Fused linear: y [m, n] (row stride n) =
 // x [m, k] (row stride ldx, even, 4-byte aligned) @ W.T (+ bias).
 // NF12 weights pass `nf12 = true`, their escapes (null when none) and exp_base;
 // bf16t twins pass `nf12 = false`.
@@ -388,6 +411,15 @@ void launch_linear(E& e, Route route, const typename E::tensor& x, uint64_t ldx,
       kernel = "nf12_linear_mma_" + src + "_b" + std::to_string(mb);
       gy = ceil_div(uint64_t(m), 8 * mb);
     }
+  } else if (route == Route::kTensor) {
+    const auto [tokens, splits] = tensor_config(m, k);
+    constexpr uint32_t simdgroups = 4;
+    kernel = "nf12_linear_tensor_" + src + "_m" + std::to_string(tokens) + "_s" + std::to_string(splits);
+    gx = ceil_div(uint64_t(n / 16), simdgroups / splits);
+    gy = ceil_div(uint64_t(m), tokens);
+    threads = 32 * simdgroups;
+    p.splits = splits;
+    p.kb_per_split = uint32_t(ceil_div(p.k_blocks, splits));
   } else {
     kernel = "nf12_linear_gemm_" + src;
     gx = ceil_div(uint64_t(n), kGemmBN);
