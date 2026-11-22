@@ -278,7 +278,7 @@ inline void moe_gemm(Experts experts, device const ushort* x, MoeRows rows, devi
   gemm_zero(acc);
   for (uint kb = 0; kb < p.k_blocks; ++kb)
     gemm_slab(src, ulong(nb) * p.k_blocks + kb, valid, x, xoff, kb, sm, acc, sg, lane, tid);
-  threadgroup const float* c = gemm_stage(acc, sm, sg);
+  threadgroup const float* c = gemm_stage(acc, sm.w, sg);
   for (uint i = tid; i < kGemmBN * kGemmBM; i += 32 * kGemmSimdgroups) {
     const uint nl = i % kGemmBN, ml = i / kGemmBN;
     const uint n = n0 + nl;

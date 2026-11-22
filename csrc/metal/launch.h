@@ -71,11 +71,11 @@ using out_ptr = std::remove_reference_t<typename E::out_t>*;
 // ---------------------------------------------------------------------------
 // Parameter structs (must match the .metal declarations).
 
-struct LinearParams {  // linear.metal LinearParams
+struct LinearParams {  // nf12_metal.h LinearParams
   uint64_t ldx, ldy;
   uint32_t m, n, k_blocks, kb_per_split, row_blocks, splits, has_bias, reserved;
 };
-static_assert(sizeof(LinearParams) == 48, "LinearParams layout must match linear.metal");
+static_assert(sizeof(LinearParams) == 48, "LinearParams layout must match nf12_metal.h");
 
 struct MoeParams {  // moe.metal MoeParams
   uint64_t ldx, ldy, expert_super_atoms;
@@ -87,6 +87,7 @@ static_assert(sizeof(MoeParams) == 64, "MoeParams layout must match moe.metal");
 // Routing. Routes depend on shapes and architecture (SPEC.md 6.5, 9.3).
 
 enum class Route { kSmall, kMma, kGemm, kDecode, kTensor };
+enum class LinearBackend { kMps, kMlx };
 
 // Metal 4 TensorOps tiles. Each simdgroup owns 16 output columns. Longer
 // reductions split K within a threadgroup to keep more of the GPU occupied.
@@ -107,8 +108,7 @@ inline bool tensor_prefill(int64_t m, int64_t n, int64_t k) {
 }
 
 // NF12_MPS_LINEAR=small|mma|gemm|decode forces a route (decode needs NF12) for testing.
-inline Route linear_route(int64_t m, int64_t n, int64_t k, bool nf12, bool tensor = false,
-                          bool prefer_fused_gemm = false) {
+inline Route linear_route(int64_t m, int64_t n, int64_t k, bool nf12, bool tensor, LinearBackend backend) {
   if (const char* env = std::getenv("NF12_MPS_LINEAR"); env != nullptr && *env != '\0') {
     const std::string s(env);
     if (s == "small") return Route::kSmall;
@@ -117,7 +117,12 @@ inline Route linear_route(int64_t m, int64_t n, int64_t k, bool nf12, bool tenso
     if (s == "decode") return nf12 ? Route::kDecode : Route::kGemm;
     throw std::invalid_argument("nf12: NF12_MPS_LINEAR must be small, mma, gemm or decode, got " + s);
   }
-  if (tensor && tensor_prefill(m, n, k)) {
+  const bool mlx = backend == LinearBackend::kMlx;
+  const bool short_prefill = m > 16 && m <= kGemmBM && k >= 2048;
+  const bool wide_fused = short_prefill && n >= 4096 && k <= 16384;
+  // MPS decode-GEMM is competitive on narrower projections.
+  const bool prefer_tensor = mlx || (n >= 4096 && (n >= 8192 || k > 4096 || wide_fused));
+  if (tensor && prefer_tensor && tensor_prefill(m, n, k)) {
     const char* lib = std::getenv("NF12_METALLIB");
     if (lib == nullptr || *lib == '\0') return Route::kTensor;
   }
@@ -126,7 +131,8 @@ inline Route linear_route(int64_t m, int64_t n, int64_t k, bool nf12, bool tenso
   // beyond that matmul is compute bound and BF16 matmul on decoded slices wins.
   if (m <= 4) return Route::kSmall;
   if (m <= 16) return Route::kMma;
-  return nf12 && !prefer_fused_gemm ? Route::kDecode : Route::kGemm;
+  const bool fused = wide_fused || (mlx && short_prefill && n >= 512 && k <= 4096);
+  return nf12 && !fused ? Route::kDecode : Route::kGemm;
 }
 
 inline uint32_t small_mt(int64_t m) { return m <= 1 ? 1 : m <= 2 ? 2 : m <= 4 ? 4 : 8; }

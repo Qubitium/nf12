@@ -280,15 +280,9 @@ void decode_gemm(const WeightView& w, const Tensor& x2, const std::optional<Tens
   }
 }
 
-// One fused GEMM tile avoids writing and rereading the decoded weight
-// when output width offers enough threadgroups to fill the GPU.
 Route dense_linear_route(int64_t m, int64_t n, int64_t k, bool nf12) {
   static const bool tensor = supports_tensor_linear(mtl_device());
-  const bool fused_prefill = m > 16 && m <= kGemmBM && n >= 4096 && k >= 2048 && k <= 16384;
-  // For smaller projections, MPS gains most when TensorOps replaces the
-  // existing fused prefill tile. Its decode-GEMM is competitive at larger M.
-  const bool prefer_tensor = tensor && n >= 4096 && (n >= 8192 || k > 4096 || fused_prefill);
-  return linear_route(m, n, k, nf12, prefer_tensor, fused_prefill);
+  return linear_route(m, n, k, nf12, tensor, LinearBackend::kMps);
 }
 
 // `nf12_view` is null for bf16t weights.

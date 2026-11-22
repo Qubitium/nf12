@@ -8,12 +8,6 @@ using namespace nf12;
 
 constant constexpr uint kSmallMaxSimdgroups = 16;
 
-inline void store_linear(device ushort* y, device const ushort* bias, constant LinearParams& p,
-                         uint m, uint n, float sum) {
-  if (p.has_bias) sum += bf16_to_float(bias[n]);
-  y[ulong(m) * p.ldy + n] = float_to_bf16(sum);
-}
-
 // ---------------------------------------------------------------------------
 // Small M. Threadgroup (x, y) covers row blocks [x RB, x RB + RB) and activation
 // rows [y MT, y MT + MT); simdgroup sg = rb KS + ks owns row block rb, K split ks.
@@ -139,18 +133,9 @@ template <typename Src>
 inline void linear_gemm_slab(Src src, ulong sa, bool valid, device const ushort* x, threadgroup const ulong* xoff,
                             uint kb, threadgroup LinearGemmSlab& slab, thread GemmAcc& acc,
                             uint sg, uint lane, uint tid) {
-  const uint row = 16 * sg + (lane >> 2);
-  const uint pair = lane & 3u;
-  threadgroup uint* w0 = reinterpret_cast<threadgroup uint*>(slab.w + row * kGemmLd) + pair;
-  threadgroup uint* w1 = w0 + 8 * kGemmLd / 2;
   uint r[4][4] = {};
   if (valid) src.load(sa, lane, r);
-  for (uint j = 0; j < 4; ++j) {
-    w0[8 * j] = r[j][0];
-    w0[8 * j + 4] = r[j][2];
-    w1[8 * j] = r[j][1];
-    w1[8 * j + 4] = r[j][3];
-  }
+  stage_bf16_tile<kGemmLd>(reinterpret_cast<threadgroup uint*>(slab.w + 16 * sg * kGemmLd), lane, r);
 
   for (uint i = tid; i < kGemmBM * (kSuperAtomCols / 2); i += 32 * kGemmSimdgroups) {
     const uint m = i / (kSuperAtomCols / 2), col = i % (kSuperAtomCols / 2);
@@ -160,19 +145,7 @@ inline void linear_gemm_slab(Src src, ulong sa, bool valid, device const ushort*
       bits = *reinterpret_cast<device const uint*>(x + off + ulong(kb) * kSuperAtomCols + 2 * col);
     reinterpret_cast<threadgroup uint*>(slab.x + m * kGemmLd)[col] = bits;
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint kk = 0; kk < kSuperAtomCols; kk += 8) {
-    simdgroup_bfloat8x8 a0, a1;
-    simdgroup_load(a0, slab.w + (16 * sg) * kGemmLd + kk, kGemmLd);
-    simdgroup_load(a1, slab.w + (16 * sg + 8) * kGemmLd + kk, kGemmLd);
-    for (uint c = 0; c < kGemmBM / 8; ++c) {
-      simdgroup_bfloat8x8 b;
-      simdgroup_load(b, slab.x + (8 * c) * kGemmLd + kk, kGemmLd, ulong2(0, 0), true);
-      simdgroup_multiply_accumulate(acc[0][c], a0, b, acc[0][c]);
-      simdgroup_multiply_accumulate(acc[1][c], a1, b, acc[1][c]);
-    }
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
+  gemm_multiply(slab.w, slab.x, acc, sg);
 }
 
 // Large M. Threadgroup (x, y) computes y rows [32 y, 32 y + 32) x columns [64 x, 64 x + 64).
@@ -189,17 +162,12 @@ inline void linear_gemm(Src src, device const ushort* x, device const ushort* bi
   gemm_zero(acc);
   for (uint kb = 0; kb < p.k_blocks; ++kb)
     linear_gemm_slab(src, ulong(nb) * p.k_blocks + kb, valid, x, xoff, kb, sm.slab, acc, sg, lane, tid);
-  for (uint h = 0; h < 2; ++h)
-    for (uint q = 0; q < kGemmBM / 8; ++q)
-      simdgroup_store(acc[h][q], sm.c + (16 * sg + 8 * h) * kGemmCLd + 8 * q, kGemmCLd);
-  threadgroup_barrier(mem_flags::mem_threadgroup);
+  threadgroup const float* c = gemm_stage(acc, sm.c, sg);
   for (uint i = tid; i < kGemmBN * kGemmBM; i += 32 * kGemmSimdgroups) {
     const uint nl = i % kGemmBN, ml = i / kGemmBN;
     const uint n = n0 + nl, m = m0 + ml;
     if (n >= p.n || m >= p.m) continue;
-    float s = sm.c[nl * kGemmCLd + ml];
-    if (p.has_bias) s += bf16_to_float(bias[n]);
-    y[ulong(m) * p.ldy + n] = float_to_bf16(s);
+    store_linear(y, bias, p, m, n, c[nl * kGemmCLd + ml]);
   }
 }
 

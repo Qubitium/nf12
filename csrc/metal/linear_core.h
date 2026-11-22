@@ -121,7 +121,7 @@ inline void mma_accumulate(Src src, ulong sa_base, uint kb0, uint kb1, device co
 constant constexpr uint kGemmSimdgroups = 4;
 constant constexpr uint kGemmBN = 16 * kGemmSimdgroups;  // 64 weight rows
 constant constexpr uint kGemmBM = 32;                    // activation rows
-constant constexpr uint kGemmLd = kSuperAtomCols + 4;    // padded threadgroup row (floats)
+constant constexpr uint kGemmLd = kSuperAtomCols + 4;    // padded threadgroup stride
 constant constexpr uint kGemmCLd = kGemmBM + 4;
 
 struct GemmSmem {
@@ -135,6 +135,23 @@ using GemmAcc = simdgroup_float8x8[2][kGemmBM / 8];
 inline void gemm_zero(thread GemmAcc& acc) {
   for (uint r = 0; r < 2; ++r)
     for (uint c = 0; c < kGemmBM / 8; ++c) acc[r][c] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+}
+
+template <typename T>
+inline void gemm_multiply(threadgroup const T* w, threadgroup const T* x, thread GemmAcc& acc, uint sg) {
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint kk = 0; kk < kSuperAtomCols; kk += 8) {
+    simdgroup_matrix<T, 8, 8> a0, a1;
+    simdgroup_load(a0, w + (16 * sg) * kGemmLd + kk, kGemmLd);
+    simdgroup_load(a1, w + (16 * sg + 8) * kGemmLd + kk, kGemmLd);
+    for (uint c = 0; c < kGemmBM / 8; ++c) {
+      simdgroup_matrix<T, 8, 8> b;  // b[k][m] = x[m][k]
+      simdgroup_load(b, x + (8 * c) * kGemmLd + kk, kGemmLd, ulong2(0, 0), true);
+      simdgroup_multiply_accumulate(acc[0][c], a0, b, acc[0][c]);
+      simdgroup_multiply_accumulate(acc[1][c], a1, b, acc[1][c]);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
 // One 64-column slab. `nb_valid` is false for row blocks past N (zeros).
@@ -181,25 +198,12 @@ inline void gemm_slab(Src src, ulong sa, bool nb_valid, device const ushort* x, 
     sm.x[row * kGemmLd + 2 * pair] = lo;
     sm.x[row * kGemmLd + 2 * pair + 1] = hi;
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint kk = 0; kk < kSuperAtomCols; kk += 8) {
-    simdgroup_float8x8 a0, a1;
-    simdgroup_load(a0, sm.w + (16 * sg) * kGemmLd + kk, kGemmLd);
-    simdgroup_load(a1, sm.w + (16 * sg + 8) * kGemmLd + kk, kGemmLd);
-    for (uint c = 0; c < kGemmBM / 8; ++c) {
-      simdgroup_float8x8 b;  // b[k][m] = x[m][k]
-      simdgroup_load(b, sm.x + (8 * c) * kGemmLd + kk, kGemmLd, ulong2(0, 0), true);
-      simdgroup_multiply_accumulate(acc[0][c], a0, b, acc[0][c]);
-      simdgroup_multiply_accumulate(acc[1][c], a1, b, acc[1][c]);
-    }
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
+  gemm_multiply(sm.w, sm.x, acc, sg);
 }
 
 // Writes the accumulators to threadgroup memory as C[n][m] (kGemmBN x kGemmCLd floats,
 // reusing the slab buffers). All threads must call this; read C after it returns.
-inline threadgroup float* gemm_stage(thread GemmAcc& acc, threadgroup GemmSmem& sm, uint sg) {
-  threadgroup float* c = sm.w;
+inline threadgroup float* gemm_stage(thread GemmAcc& acc, threadgroup float* c, uint sg) {
   for (uint r = 0; r < 2; ++r)
     for (uint q = 0; q < kGemmBM / 8; ++q) simdgroup_store(acc[r][q], c + (16 * sg + 8 * r) * kGemmCLd + 8 * q, kGemmCLd);
   threadgroup_barrier(mem_flags::mem_threadgroup);

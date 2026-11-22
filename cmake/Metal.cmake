@@ -14,31 +14,25 @@ set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Metal's in-process compiler has no include path for project headers.
-# Concatenate the shared helpers once, before the three kernel families.
 set(_nf12_metal_dir "${CMAKE_CURRENT_SOURCE_DIR}/csrc/metal")
-set(_nf12_shader_source "")
-foreach(_source IN ITEMS nf12_metal.h linear_core.h codec.metal linear.metal moe.metal)
-  set(_path "${_nf12_metal_dir}/${_source}")
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_path}")
-  file(READ "${_path}" _contents)
-  string(REGEX REPLACE [=[#pragma once|#include "(nf12_metal|linear_core)[.]h"]=] "" _contents "${_contents}")
-  string(APPEND _nf12_shader_source "#line 1 \"${_source}\"\n${_contents}\n")
-endforeach()
-set(_tensor_source "${_nf12_metal_dir}/linear_tensor.metal")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_tensor_source}")
-file(READ "${_nf12_metal_dir}/nf12_metal.h" _tensor_helpers)
-string(REPLACE "#pragma once" "" _tensor_helpers "${_tensor_helpers}")
-file(READ "${_tensor_source}" _tensor_kernel)
+function(nf12_embed_metal output)
+  set(source "")
+  foreach(file IN LISTS ARGN)
+    set(path "${_nf12_metal_dir}/${file}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
+    file(READ "${path}" contents)
+    string(REGEX REPLACE [=[#pragma once|#include "(nf12_metal|linear_core)[.]h"]=] "" contents "${contents}")
+    string(APPEND source "#line 1 \"${file}\"\n${contents}\n")
+  endforeach()
+  set(${output} "${source}" PARENT_SCOPE)
+endfunction()
+nf12_embed_metal(_nf12_shader_source nf12_metal.h linear_core.h codec.metal linear.metal moe.metal)
+nf12_embed_metal(_nf12_tensor_source nf12_metal.h linear_tensor.metal)
 file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/nf12_shader_source.h" CONTENT [=[
 #pragma once
 namespace nf12::metal {
 inline constexpr char kShaderSource[] = R"nf12metal(@_nf12_shader_source@)nf12metal";
-inline constexpr char kTensorShaderSource[] = R"nf12metal(
-#line 1 "nf12_metal.h"
-@_tensor_helpers@
-#line 1 "linear_tensor.metal"
-@_tensor_kernel@
-)nf12metal";
+inline constexpr char kTensorShaderSource[] = R"nf12metal(@_nf12_tensor_source@)nf12metal";
 }
 ]=] @ONLY)
 

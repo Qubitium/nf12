@@ -50,19 +50,10 @@ inline void linear_tensor(Src src, device const bfloat* x, device const ushort* 
   const uint kb1 = min(kb0 + p.kb_per_split, p.k_blocks);
   if (valid) {
     const ulong first_atom = ulong(n0 / kTensorN) * p.k_blocks;
-    const uint group_row = lane >> 2;
-    const uint pair_col = lane & 3u;
     for (uint kb = kb0; kb < kb1; ++kb) {
       uint regs[4][4];
       src.load(first_atom + kb, lane, regs);
-      #pragma unroll
-      for (uint j = 0; j < 4; ++j) {
-        threadgroup uint* row = scratch[sg] + group_row * (kTensorK / 2) + j * 8 + pair_col;
-        row[0] = regs[j][0];
-        row[8 * (kTensorK / 2)] = regs[j][1];
-        row[4] = regs[j][2];
-        row[8 * (kTensorK / 2) + 4] = regs[j][3];
-      }
+      stage_bf16_tile<kTensorK>(scratch[sg], lane, regs);
       simdgroup_barrier(mem_flags::mem_threadgroup);
       auto a_tile = a.template slice<kTensorK, BM>(kb * kTensorK, 0);
       op.run(a_tile, w_tile, acc);
@@ -87,8 +78,7 @@ inline void linear_tensor(Src src, device const bfloat* x, device const ushort* 
     #pragma unroll
     for (uint split = 1; split < KS; ++split)
       sum += as_type<float>(scratch[sg + split][lane * acc.get_capacity() + i]);
-    if (p.has_bias) sum += bf16_to_float(bias[n]);
-    y[ulong(m) * p.ldy + n] = float_to_bf16(sum);
+    store_linear(y, bias, p, m, n, sum);
   }
 }
 

@@ -119,7 +119,7 @@ QuixiCore-Metal's `tk_launch.h`. The two adapters are:
   no-op on PyTorch's serial encoder.
 
 `NF12_METALLIB` can point to a compatible precompiled shader library. By default,
-each backend compiles the embedded source once per process.
+each backend compiles the required embedded libraries on first use.
 
 ## Kernels
 
@@ -163,25 +163,17 @@ matmul on the decoded weight (as on CUDA).
 
 ## Routing
 
-Default routes use the following shape thresholds measured on an M5 Max:
+Outside the prefill cases below, linear uses scalar kernels up to 4 tokens and
+register MMA up to 16. Larger inputs use decode-then-GEMM for NF12 or fused GEMM
+for bf16t. MoE uses scalar kernels up to 4 expected rows per expert and register
+MMA up to 8, then fused GEMM.
 
-| op | route |
-|---|---|
-| `linear`, `linear_bf16t` | M <= 4 scalar; M <= 16 register MMA; larger M: NF12 decode-then-GEMM, bf16t fused GEMM |
-| `moe_linear` (expected rows per expert r) | r <= 4 scalar; r <= 8 register MMA; larger: fused GEMM |
-
-MLX and MPS use the fused GEMM kernel for NF12 linear at 17–32 tokens
-with `N >= 4096` and `2048 <= K <= 16384`. MLX also uses it with
-`N >= 512` and `2048 <= K <= 4096`. The kernel stages BF16 operands in
-threadgroup memory and accumulates in FP32. The wider range was measured
-on M6. The fused route avoids decoded-weight scratch.
-
-On macOS 27 or later, both backends use Metal 4.1 TensorOps for selected
-dense shapes at 16–128 tokens when Metal reports Apple10 family support.
-Each SIMD group decodes a BF16 weight
-tile for the GPU matrix units and accumulates in FP32. Long reductions use
-ordered split-K inside the threadgroup. Explicit route overrides and
-`NF12_METALLIB` use the standard kernels.
+- At 17–32 tokens, both backends use fused GEMM for `N >= 4096` and
+  `2048 <= K <= 16384`. MLX also uses it for `N >= 512` and
+  `2048 <= K <= 4096`.
+- On macOS 27 or later with Apple10 GPU support, Metal 4.1 TensorOps handles
+  selected dense shapes at 16–128 tokens. Long reductions use ordered split-K.
+  Explicit route overrides and `NF12_METALLIB` select the standard kernels.
 
 `NF12_MPS_LINEAR=small|mma|gemm|decode` and `NF12_MPS_MOE=small|mma|gemm` force a
 route for both frameworks (tests run the suites under each; the MLX tests set them
@@ -258,9 +250,6 @@ Apple GPU generation when one is available.
 
 ## Limitations and next steps
 
-- Medium and large M are bounded by FP32 `simdgroup_matrix` throughput. Metal 4
-  tensor operations (the M5 GPU's matrix units) for the decoded tiles are the next
-  step for M > 16 and for MoE prefill.
 - Small-T MoE runs 9 dispatches (align, schedule, two grouped linears, SiLU-mul,
   combine); fusing align with the schedule and SiLU-mul into the w13 epilogue, as
   CUDA's single-token route does, would cut most of the remaining overhead.

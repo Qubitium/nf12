@@ -53,6 +53,12 @@ inline ushort float_to_bf16(float f) {
 }
 inline uint pack_bf16x2(float lo, float hi) { return uint(float_to_bf16(lo)) | (uint(float_to_bf16(hi)) << 16); }
 
+inline void store_linear(device ushort* y, device const ushort* bias, constant LinearParams& p,
+                         uint m, uint n, float sum) {
+  if (p.has_bias) sum += bf16_to_float(bias[n]);
+  y[ulong(m) * p.ldy + n] = float_to_bf16(sum);
+}
+
 // ---------------------------------------------------------------------------
 // Group decode (SPEC.md section 3). Byte j of a/b is hi(s(2j)) / hi(s(2j+1)).
 inline uint exp_base_x4(uint exp_base) { return exp_base * 0x01010101u; }
@@ -129,6 +135,20 @@ inline void store_atom(device ushort* w, ulong off, ulong ld, uint j, const thre
   *reinterpret_cast<device uint*>(p + 8 * ld) = r[1];
   *reinterpret_cast<device uint*>(p + 8) = r[2];
   *reinterpret_cast<device uint*>(p + 8 * ld + 8) = r[3];
+}
+
+// Stage a decoded 16 x 64 tile in BF16 pairs, with a stride of Ld elements.
+template <uint Ld>
+inline void stage_bf16_tile(threadgroup uint* tile, uint lane, const thread uint (&r)[4][4]) {
+  threadgroup uint* w0 = tile + (lane >> 2) * (Ld / 2) + (lane & 3u);
+  threadgroup uint* w1 = w0 + 8 * (Ld / 2);
+  #pragma unroll
+  for (uint j = 0; j < 4; ++j) {
+    w0[8 * j] = r[j][0];
+    w0[8 * j + 4] = r[j][2];
+    w1[8 * j] = r[j][1];
+    w1[8 * j + 4] = r[j][3];
+  }
 }
 
 // ---------------------------------------------------------------------------

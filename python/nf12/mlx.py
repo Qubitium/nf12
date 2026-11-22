@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """NF12 on MLX arrays (Apple GPUs).
 
-The same API as the top-level PyTorch functions (``encode``, ``linear``,
-``fused_moe`` ...), on ``mlx.core.array``. The kernels are the ones the PyTorch
-MPS backend runs, encoded on MLX's command encoder by the
-``nf12._mlx_ext`` extension, so results match ``device="mps"`` bit for bit and
-encoded weights move freely between MLX, MPS and CUDA. Ops are lazy MLX graph
-nodes; only encoding synchronizes. This module does not import PyTorch.
+The same API as the top-level PyTorch functions on ``mlx.core.array``s.
+MLX and MPS share Metal kernels and agree bit for bit on matching fused routes.
+Encoded weights move between MLX, MPS and CUDA. Ops build lazy MLX graphs, and
+encoding synchronizes. This module loads independently of PyTorch.
 
 ``nf12.encode(mx_array)`` and the other top-level functions route MLX arrays
 here, so either entry point works.
@@ -178,9 +176,8 @@ def _check_input(x: mx.array, k: int) -> None:
 def linear(x: mx.array, weight: NF12Weight, bias: mx.array | None = None) -> mx.array:
     """``y = x @ W.T (+ bias)``: bf16 ``[..., K]`` -> ``[..., N]``.
 
-    Up to 16 rows run a fused decode-plus-multiply kernel. Larger inputs
-    generally decode slices for MLX matmul. Eligible shapes at 17–32 rows
-    also use a fused kernel (see docs/METAL.md)."""
+    Fused and decode-then-matmul routes depend on the shape and GPU.
+    See docs/METAL.md."""
     _check_input(x, weight.shape[1])
     return _load().linear(x, weight.packed, weight.escapes, weight.exp_base, bias)
 
