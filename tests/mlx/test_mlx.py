@@ -179,18 +179,26 @@ def test_linear_tail_matches_the_twin(m, k):
     assert_bitwise(actual, nm.linear_bf16t(x, twin))
 
 
-@pytest.mark.parametrize("m", [17, 32, 33])
-def test_m4_max_mlx_short_prefill_route(monkeypatch, m):
-    if mx.device_info()["architecture"] != "applegpu_g16s":
-        pytest.skip("M4 Max compute route required")
-    monkeypatch.delenv("NF12_MPS_LINEAR", raising=False)
-    n, k = 528, 2048  # partial output tile with an escape in the final 16 rows
+@pytest.mark.parametrize("m,n,k,override,fused", [
+    (17, 528, 2048, None, True),
+    (32, 528, 4096, None, True),
+    (33, 528, 2048, None, False),
+    (17, 496, 2048, None, False),
+    (17, 528, 1984, None, False),
+    (17, 528, 4160, None, False),
+    (17, 528, 2048, "decode", False),
+])
+def test_mlx_short_prefill_route(monkeypatch, m, n, k, override, fused):
+    if override is None:
+        monkeypatch.delenv("NF12_MPS_LINEAR", raising=False)
+    else:
+        monkeypatch.setenv("NF12_MPS_LINEAR", override)
     w = matrix(n, k, seed=m, escapes=False)
     w[-1, -1] = 16.0
     nw = nm.encode(w)
     x, bias = activations(m, k), activations(n, seed=5)
     y = nm.linear(x, nw, bias)
-    if m <= 32:
+    if fused:
         assert_bitwise(y, nm.linear_bf16t(x, nm.pack_bf16t(w), bias))
         close_to_reference(y, x, w, bias)
     else:

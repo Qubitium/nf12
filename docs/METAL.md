@@ -168,9 +168,9 @@ Default routes use the following shape thresholds measured on an M5 Max:
 | `linear`, `linear_bf16t` | M <= 4 scalar; M <= 16 register MMA; larger M: NF12 decode-then-GEMM, bf16t fused GEMM |
 | `moe_linear` (expected rows per expert r) | r <= 4 scalar; r <= 8 register MMA; larger: fused GEMM |
 
-On M4 Max, MLX uses the fused 32-token GEMM kernel for NF12 linear at 17–32
-tokens with `N >= 512` and `2048 <= K <= 4096`. This avoids decoded-weight
-scratch for those short prefills.
+MLX uses the fused 32-token GEMM kernel for NF12 linear at 17–32 tokens
+with `N >= 512` and `2048 <= K <= 4096`. This avoids decoded-weight scratch
+for those short prefills. These thresholds were measured on M4 Max.
 
 `NF12_MPS_LINEAR=small|mma|gemm|decode` and `NF12_MPS_MOE=small|mma|gemm` force a
 route for both frameworks (tests run the suites under each; the MLX tests set them
